@@ -12,6 +12,7 @@ p_load(magrittr,purrr,reactable, tidyverse, writexl, readxl, readr, lubridate, c
 
 
 ```{r data, echo = F, warning = F, include = F}
+#adding a bit of text for a test commit
 base_day <- as.Date("2020-04-01")
 task_report_thru <- as.Date("2020-05-31") #MUST CHANGE WITH EACH NEW EXPORT
 total_time <-  as.numeric(task_report_thru - base_day) - 12 #95th percent
