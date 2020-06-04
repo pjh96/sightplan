@@ -1,0 +1,1973 @@
+---
+title: "SightPlan Anomaly Detection"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE, echo = F, warning = F}
+knitr::opts_chunk$set(echo = TRUE)
+library(pacman)
+p_load(magrittr,purrr,reactable, tidyverse, writexl, readxl, readr, lubridate, clipr, RcppRoll, janitor, funneljoin, dbplyr, ggpubr, plotly, leaflet,stats, ggrepel)
+```
+
+
+```{r data, echo = F, warning = F, include = F}
+base_day <- as.Date("2020-04-01")
+task_report_thru <- as.Date("2020-05-31") #MUST CHANGE WITH EACH NEW EXPORT
+total_time <-  as.numeric(task_report_thru - base_day)
+total_months <- total_time/30
+
+#read in all data
+data_path <- "C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/task_logs_new/"
+tasks = list.files(data_path) %>%
+  str_subset("task") %>%
+  purrr::set_names() %>%
+  map_dfr(~read_excel(paste0(data_path, .x), na = "NA", col_types = "text", sheet = "tasks"), .id="file_name") %>% 
+  clean_names()
+
+to_date <- function(x) {
+  x <- as.numeric(x)
+  x <- as.Date.numeric(x, origin = "1899-12-30")
+  return(x)
+}
+
+tasks$last_modified <- to_date(tasks$last_modified)
+tasks$schedule_priority <- to_date(tasks$schedule_priority)
+tasks$created_date <- to_date(tasks$created_date)
+tasks$closed_date <- to_date(tasks$closed_date)
+tasks$due_date <- to_date(tasks$due_date)
+
+#remove old duplicates, keep only most recently modified version
+tasks <- tasks %>% 
+  filter(!grepl("Z Test",location)) %>%
+  group_by(task_id) %>%
+  arrange(desc(last_modified)) %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num == 1) %>%
+  filter(location != "One South Market") %>%
+  filter(location != "Museum Park")
+
+#OLD BAD WAY (just in case)
+#----
+#EXCEL EXPORTS
+#total history thru 2020-05-12
+tasks1 <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/task_logs_new/task_total_history_thru_20200512.xlsx", sheet = "tasks") %>% clean_names() %>% filter(!grepl("Z Test",location))
+ 
+#report thru 2020-05-17
+tasks2 <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/task_logs_new/task_report_thru_20200517.xlsx", sheet = "tasks") %>% clean_names() %>% filter(!grepl("Z Test",location))
+
+#report thru 2020-06-01
+tasks3 <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/task_logs_new/task_report_thru_20200601.xlsx", sheet = "tasks") %>% clean_names() %>% filter(!grepl("Z Test",location))
+
+tasks <- rbind(tasks1,tasks2) 
+tasks <- rbind(tasks,tasks3) 
+
+#report thru 2020-05-24
+tasks4 <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/task_logs_new/task_report_thru_20200524.xlsx", sheet = "tasks") %>% clean_names() %>% filter(!grepl("Z Test",location))
+ 
+tasks <- rbind(tasks, tasks4)
+
+#remove old duplicates, keep only most recently modified version
+tasks <- tasks %>% 
+  group_by(task_id) %>%
+  arrange(desc(last_modified)) %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num == 1) %>%
+  filter(location != "One South Market") %>%
+  filter(location != "Museum Park")
+#----
+
+#property mapping - taken from microsoft teams
+#will no longer be necessary after integration ID is added 
+
+mapping <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/sightplan_location_names.xlsx", sheet = "Sheet1") %>% clean_names() %>% select(community_name:yardi)
+
+mapping$yardi <- ifelse(nchar(mapping$yardi)==1,paste0("00",mapping$yardi),mapping$yardi)
+mapping$yardi <- ifelse(nchar(mapping$yardi)==2,paste0("0",mapping$yardi),mapping$yardi)
+
+
+#mapping from DW
+#----
+library(DBI)
+con3 <- dbConnect(odbc::odbc(), Driver = "SQL Server", Server = "essexBI.essexpropertytrust.com", 
+    database = "Dimensions", Trusted_Connection = "True", pwd = "Newhire3915!", 
+    UID = "phummelt", Port = 1433)
+
+buildings_mapping <- dbGetQuery(con3, 'SELECT *  
+                 FROM Dimensions.dim.Property ') %>% clean_names() %>% write.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/dimprop.csv")
+dbDisconnect(con3)
+#----
+
+dimprop <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/dimprop.csv", colClasses = "character")
+
+#join mapping with DW info
+mapping <- left_join(mapping,dimprop, by = c("yardi"="property_code")) %>%
+  rename(same_store = status)
+```
+
+
+```{r to export for power bi}
+#for power BI export
+to_export <- tasks %>% filter(created_date >= "2020-04-01")
+to_export$time_to_complete <- as.numeric(difftime(to_export$closed_date, to_export$created_date, units = "days"))
+
+#change certain property names to allow mapping
+to_export$location <- ifelse(to_export$location=="Belmont Station &  Lucas House","Belmont Lucas House",to_export$location)
+to_export$location <- ifelse(to_export$location=="The Hallie" ,"Hallie, The",to_export$location)
+to_export$location <- ifelse(to_export$location=="Pinehurst Apartments & Woodside Village","Pinehurst Apartments",to_export$location)
+to_export$location <- ifelse(to_export$location=="The Pointe at Cupertino","The Pointe at cupertino",to_export$location)
+to_export$location <- ifelse(to_export$location=="The Henley","Henley, The",to_export$location)
+to_export$location <- ifelse(to_export$location=="Delano","Delano / Bon Terra",to_export$location)
+to_export$location <- ifelse(to_export$location=="The Galloway","Galloway, The",to_export$location)
+to_export$location <- ifelse(to_export$location=="Laurels @ Mill Creek","Laurels @ Mill Creek, The",to_export$location)
+to_export$location <- ifelse(to_export$location=="The Lofts at Pinehurst" ,"Lofts at Pinehurst, The",to_export$location)
+to_export$location <- ifelse(to_export$location=="The Montclaire" ,"Montclaire, The",to_export$location)
+to_export$location <- ifelse(to_export$location=="The Boulevard","Boulevard, The",to_export$location)
+to_export$location <- ifelse(to_export$location=="Wilshire Promenade","Wilshire Promenade (w/ Wilshire Court)",to_export$location)
+
+#join with mapping
+to_export <- left_join(to_export,mapping, by = c("location"="community_name"))
+
+write.csv(to_export, "C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/full_maintenance_export.csv")
+```
+
+
+```{r maintenace tasks only}
+#MAINTENANCE TASKS FOR ANALYSIS
+#filter for only maintenance tasks after 2020-04-01 (after rollout to all properties)
+maintenance <- tasks %>% filter(workspace=="Maintenance" & status == "Closed" & created_date >= '2020-04-01')
+maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date, maintenance$created_date, units = "days"))
+
+#More precise time to complete?
+#Need to confirm with Stephanie P. - 2020-06-03
+#----
+maintenance$start_time <- "1899-12-31 00:00:00"
+maintenance$start_time = ymd_hms(maintenance$start_time)
+maintenance$end_time = ymd_hms(maintenance$time_opened)
+maintenance$time_to_complete2 = difftime(maintenance$end_time,maintenance$start_time,units = "days")
+#----
+
+#change certain property names to allow mapping
+maintenance$location <- ifelse(maintenance$location=="Belmont Station &  Lucas House","Belmont Lucas House",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="The Hallie" ,"Hallie, The",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="Pinehurst Apartments & Woodside Village","Pinehurst Apartments",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="The Pointe at Cupertino","The Pointe at cupertino",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="The Henley","Henley, The",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="Delano","Delano / Bon Terra",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="The Galloway","Galloway, The",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="Laurels @ Mill Creek","Laurels @ Mill Creek, The",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="The Lofts at Pinehurst" ,"Lofts at Pinehurst, The",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="The Montclaire" ,"Montclaire, The",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="The Boulevard","Boulevard, The",maintenance$location)
+maintenance$location <- ifelse(maintenance$location=="Wilshire Promenade","Wilshire Promenade (w/ Wilshire Court)",maintenance$location)
+
+#join with mapping
+maintenance <- left_join(maintenance,mapping, by = c("location"="community_name")) %>%
+  rename(units = reporting_unit_count) %>%
+  mutate(units = as.numeric(units))
+```
+*Analysis excludes user initiated tasks as well as any task with Voicemail subcategory*
+
+### Most frequent tasks (Non-Urgent)
+```{r most occuring, echo = F, warning = F, fig.width=15, fig.height=10}
+#REACTABLE
+#----
+#filter out "Urgent" tasks to not skew time to complete
+# recurring <- maintenance %>% 
+#      filter(urgency == "Not Urgent") %>%
+#      group_by(category, subcategory) %>%
+#      summarise(num_occurences = n()) %>%
+#      arrange(desc(num_occurences)) %>%
+#      mutate(subcategory = ifelse(is.na(subcategory),category,subcategory)) %>%
+#      head(20)
+# 
+# reactable(recurring,pagination = T, filterable = T, bordered = T, highlight = T,
+#     defaultColDef = 
+#       colDef(align = "center",
+#              headerStyle = list(background = "#f7f7f8")),  
+#   columns = list(
+#   category = colDef(name = "Category"),
+#   subcategory = colDef(name = "Subcategory"),
+#   num_occurences = colDef(name = "Total # of \nOccurrences")
+# ))
+#----
+
+#check out most frequently occurring urgent and non urgent tasks (that aren't voicemail)
+recurring <- maintenance %>%
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+      filter(urgency == "Not Urgent") %>%
+     group_by(category, subcategory) %>%
+     summarise(num_occurences = n()) %>%
+     arrange(desc(num_occurences)) %>%
+     mutate(subcategory = ifelse(is.na(subcategory),category,subcategory)) %>%
+     mutate(id = paste0(category,"-",subcategory)) %>%
+     head(20)
+
+ggdotchart(recurring, x = "id", y = "num_occurences",
+           color = "category",                            # Color by category
+           sorting = "descending",                       # Sort value in descending order
+           rotate = TRUE,                                # Rotate vertically
+           dot.size = 3,                                 # Large dot size
+           y.text.col = TRUE,                            # Color y text by groups
+           ggtheme = theme_pubr(),                       # ggplot2 them
+           ylab = "Portfolio Wide # of Occurrences"
+           )+
+  theme_cleveland()+  # Add dashed grids
+  theme(legend.title = element_blank()) 
+```
+
+
+### Most frequent tasks (Urgent)
+```{r most occurring urgent, echo = F, warning = F,fig.width=15, fig.height=10}
+#NOTE: most urgent tasks are voicemail, remove filter if you want to include
+recurring <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+     filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Urgent") %>%
+     group_by(category, subcategory) %>%
+     summarise(num_occurences = n()) %>%
+     arrange(desc(num_occurences)) %>%
+     mutate(subcategory = ifelse(is.na(subcategory),category,subcategory)) %>% #fill in NA with category name
+     mutate(id = paste0(category,"-",subcategory)) %>%
+     head(20)
+
+ggdotchart(recurring, x = "id", y = "num_occurences",
+           color = "category",                           # Color by category
+           sorting = "descending",                       # Sort value in descending order
+           rotate = TRUE,                                # Rotate vertically
+           dot.size = 3,                                 # Large dot size
+           y.text.col = TRUE,                            # Color y text by groups
+           ggtheme = theme_pubr(),                       
+           ylab = "Portfolio Wide # of Occurrences"
+           )+
+  theme_cleveland()+  # Add dashed grids
+  theme(legend.title = element_blank()) 
+```
+
+
+```{r create top 20, echo = F, warning = F}
+#filter the task log by top 20 tasks by occurrence 
+##NOT URGENT
+recurring <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+      filter(urgency == "Not Urgent") %>%
+     group_by(category, subcategory) %>%
+     summarise(num_occurences = n()) %>%
+     mutate(task_code = paste0(category,":",subcategory)) %>%
+     arrange(desc(num_occurences)) %>%
+     head(20)
+
+#keep only the top twenty
+maintenance$task_code <- paste0(maintenance$category,":",maintenance$subcategory)
+top_20 <- semi_join(maintenance, recurring, by = c("task_code"="task_code")) %>% filter(urgency == "Not Urgent")
+top_20$time_to_complete <- as.numeric(difftime(top_20$closed_date, top_20$created_date, units = "days"))
+top_20$subcategory <- ifelse(is.na(top_20$subcategory), top_20$category, top_20$subcategory)
+
+##URGENT
+recurring <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Urgent") %>%
+     group_by(category, subcategory) %>%
+     summarise(num_occurences = n()) %>%
+     mutate(task_code = paste0(category,":",subcategory)) %>%
+     arrange(desc(num_occurences)) %>%
+     head(20)
+
+#keep only the top twenty
+maintenance$task_code <- paste0(maintenance$category,":",maintenance$subcategory)
+top_20_urgent <- semi_join(maintenance, recurring, by = c("task_code"="task_code")) %>% filter(urgency == "Urgent")
+top_20_urgent$time_to_complete <- as.numeric(difftime(top_20_urgent$closed_date, top_20_urgent$created_date, units = "days"))
+top_20_urgent$subcategory <- ifelse(is.na(top_20_urgent$subcategory), top_20_urgent$category, top_20_urgent$subcategory)
+
+```
+
+### Avg. time to complete (Non Urgent)
+```{r top 20, echo = F, warning = F, fig.height=10, fig.width=15}
+#KEEP IN MIND THE FILTER ON NO VOICEMAILS
+basic_graph <- top_20 %>% 
+  group_by(category,subcategory) %>%
+  summarise(avg_days_to_complete = round(mean(time_to_complete),2)) %>%
+  mutate(id = paste0(category,"-",subcategory)) %>%
+  arrange(desc(avg_days_to_complete))
+
+ggdotchart(basic_graph, x = "id", y = "avg_days_to_complete",
+           color = "category",                                # Color by groups
+           sorting = "descending",                       # Sort value in descending order
+           rotate = TRUE,                                # Rotate vertically
+           dot.size = 3,                                 # Large dot size
+           y.text.col = TRUE,                            # Color y text by groups
+           ggtheme = theme_pubr(),                        # ggplot2 theme
+           ylab = "Avg. Time to Complete in Days"
+           )+
+  theme_cleveland() +  # Add dashed grids
+  theme(legend.title = element_blank())
+```
+
+### Avg. time to complete (Urgent)
+```{r top 20 urgent, echo = F, warning = F,fig.width=15, fig.height=10}
+basic_graph <- top_20_urgent %>% 
+  group_by(category,subcategory) %>%
+  summarise(avg_days_to_complete = round(mean(time_to_complete),2)) %>%
+  mutate(id = paste0(category,"-",subcategory)) %>%
+  arrange(desc(avg_days_to_complete))
+
+ggdotchart(basic_graph, x = "id", y = "avg_days_to_complete",
+           color = "category",                                # Color by groups
+           sorting = "descending",                       # Sort value in descending order
+           rotate = TRUE,                                # Rotate vertically
+           dot.size = 3,                                 # Large dot size
+           y.text.col = TRUE,                            # Color y text by groups
+           ggtheme = theme_pubr(),                        # ggplot2 theme
+           ylab = "Avg. Time to Complete in Days"
+           )+
+  theme_cleveland() +  # Add dashed grids
+  theme(legend.title = element_blank())
+```
+
+
+### Days to complete by subcategory (Non-Urgent)
+```{r histogram, echo = F, warning = F, fig.height=10, fig.width=13}
+top_20$time_to_complete_limit <- ifelse(top_20$time_to_complete>=10,10,top_20$time_to_complete)
+
+top_20_summary <- top_20 %>%
+   group_by(category,subcategory) %>%
+   summarise(mean = mean(time_to_complete))
+
+ggplot(top_20, aes(x=time_to_complete_limit)) + 
+  geom_histogram(binwidth = 1, aes(y = ..density..)) + 
+  facet_wrap(~category + subcategory) +
+  ylab("% of Total of Occurences since 2020-04-01") + 
+  xlab("# of Days to Close Task") +
+  theme_light() +
+  theme(text = element_text(size = 15)) +
+  scale_x_continuous(breaks = seq(0,10,2),labels = c("0","2","4","6","8","10+")) +
+  scale_y_continuous(labels = c("0","20%","40%","60%")) + 
+  geom_vline(data = top_20_summary, aes(xintercept = mean), col = "red", linetype = "longdash", size = 0.5)
+
+```
+
+
+### Days to complete by subcategory (Urgent)
+```{r histogram urgent, echo = F, warning = F,fig.height=10, fig.width=13}
+top_20_urgent$time_to_complete_limit <- ifelse(top_20_urgent$time_to_complete>=10,10,top_20_urgent$time_to_complete)
+
+top_20_urgent_summary <- top_20_urgent %>%
+   group_by(category,subcategory) %>%
+   summarise(mean = mean(time_to_complete))
+
+ggplot(top_20_urgent, aes(x=time_to_complete_limit)) + 
+  geom_histogram(binwidth = 1, aes(y = ..density..)) + 
+  facet_wrap(~category + subcategory) +
+  ylab("% of Total of Occurences since 2020-04-01") + 
+  xlab("# of Days to Close Task") +
+  theme_light() +
+  theme(text = element_text(size = 15)) +
+  scale_x_continuous(breaks = seq(0,10,2),labels = c("0","2","4","6","8","10+")) +
+  scale_y_continuous(labels = c("0","20%","40%","60%","80%")) + 
+  geom_vline(data = top_20_urgent_summary, aes(xintercept = mean), col = "red", linetype = "longdash", size = 0.5)
+
+
+```
+
+
+#### Drill down table for all properties
+```{r by task, echo = F, warning = F}
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  group_by(location,category,subcategory) %>% 
+  filter(units > 2) %>% 
+  summarise(count = n(),
+            units = mean(units, na.rm = T),
+            count_per_unit = count/units,
+            log = log(count_per_unit)) %>% 
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = mean(log),
+         sd_of_subcategory = sd(log),
+         og_zscore = (count_per_unit - mean(count_per_unit))/sd(count_per_unit),
+         new_zscore = round((log - mean(log))/sd(log),2)) %>%
+  arrange(desc(new_zscore))%>%
+  select(location, category, subcategory, new_zscore)
+
+maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date, maintenance$created_date, units = "days"))
+
+itemized <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  filter(units>2) %>%
+  group_by(location,category,subcategory) %>% 
+  mutate(count = n(),
+         units = mean(units),
+         count_per_unit_per_year = (count*(365/total_time))/units, #CHANGE WITH EACH NEW EXPORT
+         count_per_unit = count/units) %>%
+  ungroup() %>%
+  mutate(log2 = log(time_to_complete+1)) %>% #add 1 to deal with 0s
+  group_by(category,subcategory) %>%
+  mutate(created_date = as.Date(created_date),
+         closed_date = as.Date(closed_date),
+         new_zscore2 = round((log2-mean(log2))/sd(log2),2)) %>%
+  select(location, category,subcategory,description, closed_by, created_date,time_to_complete,new_zscore2,
+         count_per_unit_per_year) %>%
+  arrange(location)
+
+itemized <- left_join(itemized,summary, by = c("location" = "location", "category"="category","subcategory"="subcategory"))
+
+reactable(itemized, wrap=F, resizable = T, compact = T, fullWidth = F, groupBy = c("location","category","subcategory"), pagination = T, filterable = T, bordered = T, highlight = T,
+    defaultColDef = 
+      colDef(align = "center",
+             headerStyle = list(background = "#f7f7f8")
+             #cell = function(value) ifelse(is.numeric(value),round(value,2),value)
+             ),
+          columns = list(
+            location = colDef(name = "Property"),
+            category = colDef(name = "Category"),
+            subcategory = colDef(name = "Subcategory"),
+            description = colDef(name = "Task Description"),
+            closed_by = colDef(name = "Closed By"),
+            created_date = colDef(name = "Created Date"),
+            time_to_complete = colDef(name = "Time to Complete (Days)", aggregate = "mean",format = colFormat(digits = 2)),
+            count_per_unit_per_year = colDef(name = "Annualized Count \nper Unit", aggregate = "mean",format = colFormat(digits = 2)),
+            new_zscore = colDef(name = "Z-Score (# of Occurrences)", aggregate = "mean",format = colFormat(digits = 2)),
+            new_zscore2 = colDef(name = "Z-Score (Time to Complete)", aggregate = "mean", format = colFormat(digits = 2))
+          ))
+
+```
+
+### 1) Are there tasks that occur much more frequently on a by-unit basis?
+#### Data: closed, non urgent maintenance tasks opened after 2020-04-01 (top 20 subcategories only)
+```{r frequency2, echo = F, warning = F}
+#take log normal transformation to get normal distribution
+summary <- top_20 %>% 
+  group_by(location,category,subcategory) %>% 
+  filter(units > 2) %>%
+  summarise(count = n(),
+            units = mean(units),
+            count_per_unit = count/units,
+            count_per_unit_per_year = round((count*(365/total_time))/units,2),
+            log = log(count_per_unit)) %>%
+  # take this step because if you include, then the properties with <50 units skew the results by affecting the mean and sd of the subcategory
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = mean(log),
+         sd_of_subcategory = sd(log),
+         og_zscore = (count_per_unit - mean(count_per_unit))/sd(count_per_unit),
+         new_zscore = round((log - mean(log))/sd(log),2)) %>%
+  arrange(desc(new_zscore))%>%
+  select(location, category, subcategory, count_per_unit_per_year, units, new_zscore)
+
+
+reactable(summary,pagination = T, filterable = T, bordered = T, highlight = T,
+    defaultColDef = 
+      colDef(align = "center",
+             headerStyle = list(background = "#f7f7f8")),
+    columns = list(
+      location = colDef(name = "Property"),
+      category = colDef(name = "Category"),
+      subcategory = colDef(name = "Subcategory"),
+      units = colDef(name = "Unit Count"),
+      count_per_unit_per_year = colDef(name = "Annualized Count per Unit"),
+      new_zscore = colDef(name = "Normalized Z-score \n(within subcategory)")))
+```
+
+
+### Property Z-score weighted by (# of occurences / total tasks)
+#### Data: closed, non urgent maintenance tasks after 2020-04-01 
+```{r weighted z score, echo = F, warning = F}
+summary <- maintenance %>%
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+  group_by(location) %>%
+  filter(urgency == "Not Urgent") %>%
+  mutate(total = n()) %>%
+  ungroup () %>%
+  group_by(location,category,subcategory) %>% 
+  filter(!is.na(units)) %>%
+  summarise(count = n(),
+            total_tasks = mean(total),
+            units = mean(units),
+            count_per_unit = count/units,
+            log = log(count_per_unit)) %>%
+  filter(units > 2) %>% 
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = mean(count_per_unit), #mean occurences of tasks across portfolio
+         sd_of_subcategory = sd(count_per_unit), #sd of occurences of tasks across portfolio
+         og_zscore = (count_per_unit - mean(count_per_unit))/sd(count_per_unit),
+         new_zscore = round((log - mean(log))/sd(log),2),
+         zscore_weighted = new_zscore * (count/total_tasks)) %>%
+  filter(!is.na(og_zscore)) %>%
+  ungroup() %>%
+  group_by(location) %>%
+  summarise(weighted_z_scores = round(sum(zscore_weighted),2))%>%
+  arrange(desc(weighted_z_scores))
+
+#Reactable
+#----
+# reactable(summary,pagination = T, filterable = T, bordered = T, highlight = T,
+#     defaultColDef = colDef(align = "center",headerStyle = list(background = "#f7f7f8"),cell = function(value) format(value, nsmall = 2)),
+#     columns = list(
+#        location = colDef(name = "Property"),
+#        weighted_z_scores = colDef(name = "Weighted \n Z Score")))
+#----
+
+#convert reactable into a chart with top and bottom ten
+summary %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num <= 10 | row_num >= max(row_num-10)) %>%
+  mutate(group = ifelse(row_num <= 10, "low","high")) %>%
+  ggbarplot(x = "location", y = "weighted_z_scores",
+          fill = "group",           # change fill color by mpg_level
+          color = "white",            # Set bar border colors to white
+          palette = c('#90ee90',"#cc0000"),            # jco journal color palett. see ?ggpar
+          sort.val = "desc",          # Sort the value in descending order
+          sort.by.groups = FALSE,     # Don't sort inside each group
+          x.text.angle = 0,          # Rotate vertically x axis texts
+          ylab = "Frequency z-score",
+          xlab = "",
+          legend = "none",
+          legend.title = "",
+          rotate = TRUE,
+          ggtheme = theme_minimal(),
+          title = "Top and Bottom 10 Properties"
+          ) 
+
+```
+
+
+### 2) Are there tasks at certain properties that take much more time than the portfolio avg?
+#### Data: closed, non urgent maintenance tasks after 2020-04-01 with 3+ occurences at any property (top 20 subcategories only)
+```{r time, echo = F, warning = F}
+#MEAN analysis
+summary <- top_20 %>% 
+  group_by(location,category,subcategory) %>% 
+  summarise(count = n(),
+            avg_time_to_complete = round(mean(time_to_complete),2),
+            #log = sqrt(avg_time_to_complete)) %>%
+            log = log(avg_time_to_complete+1))%>%    #account for 0 days to complete 
+  filter(count > 2) %>% #arbitrary selection, did not want low count to create misleading outliers
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = round(mean(avg_time_to_complete),2),
+         sd_of_subcategory = sd(avg_time_to_complete),
+         og_zscore = (avg_time_to_complete - mean(avg_time_to_complete))/sd(avg_time_to_complete),
+         new_zscore = round(((log-mean(log))/sd(log)),2)) %>%
+  arrange(desc(new_zscore)) %>%
+  select(location, category, subcategory, count, avg_time_to_complete, mean_of_subcategory, new_zscore)
+
+#recast as median
+#HOW TO DO THIS USING MEAN? USE MEDIAN ABSOLUTE DEVIATION?
+#----
+summary <- top_20 %>% 
+  group_by(category,subcategory) %>%
+  mutate(median_of_subcategory = median(time_to_complete))
+  group_by(location,category,subcategory) %>% 
+  summarise(count = n(),
+            avg_time_to_complete = round(median(time_to_complete),2),
+            #log = sqrt(avg_time_to_complete)) %>%
+            log = log(avg_time_to_complete+1))%>%     
+  filter(count > 2) %>% #arbitrary selection, did not want low count to create misleading outliers
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = round(median(avg_time_to_complete),2),
+         sd_of_subcategory = sd(avg_time_to_complete),
+         og_zscore = (avg_time_to_complete - mean(avg_time_to_complete))/sd(avg_time_to_complete),
+         new_zscore = round(((log-mean(log))/sd(log)),2)) %>%
+  arrange(desc(new_zscore)) %>%
+  select(location, category, subcategory, count, avg_time_to_complete, mean_of_subcategory, new_zscore)
+#----
+  
+reactable(summary,wrap = F, resizable = T, compact = T, fullWidth = F, pagination = T, filterable = T, bordered = T, highlight = T, 
+    defaultColDef = colDef(align = "center",headerStyle = list(background = "#f7f7f8"),cell = function(value) format(value, nsmall = 2)),
+    columns = list(
+    location = colDef(name = "Property"),
+    category = colDef(name = "Category"),
+    subcategory = colDef(name = "Subcategory"),
+    count = colDef(name = "# of Occurences \nat Property"),
+    avg_time_to_complete = colDef(name = "Property Avg. Time to \nComplete"),
+    mean_of_subcategory = colDef(name = "Portfolio Avg. Time to \nComplete"),
+    new_zscore = colDef(name = "Normalized Z-score \n(within subcategory)")))
+```
+
+### Property Z-score weighted by # of occurences / total tasks
+#### Data: closed, non urgent maintenance tasks after 2020-04-01 
+```{r wieghted z score 2, echo = F , warning = F}
+maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date, maintenance$created_date, units = "days"))
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  group_by(location) %>%
+  mutate(total = n()) %>%
+  ungroup() %>%
+  group_by(location,category,subcategory) %>% 
+  summarise(count = n(),
+            total_tasks = mean(total),
+            avg_time_to_complete = mean(time_to_complete),
+            log = log(avg_time_to_complete+1))%>% 
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = mean(avg_time_to_complete),
+         sd_of_subcategory = sd(avg_time_to_complete),
+         og_zscore = (avg_time_to_complete - mean(avg_time_to_complete))/sd(avg_time_to_complete),
+         new_zscore = ((log-mean(log))/sd(log)),
+         zscore_weighted = new_zscore * (count/total_tasks)) %>%
+  filter(!is.na(og_zscore))%>%
+  ungroup() %>%
+  group_by(location) %>%
+  summarise(weighted_z_scores = round(sum(zscore_weighted),2))%>%
+  arrange(desc(weighted_z_scores))  %>%
+  filter(!is.nan(weighted_z_scores)) 
+
+reviews_maint_related <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_20200401_thru_20200601.csv", colClasses = "character") %>% 
+  clean_names() %>%
+  filter(rating == 1) %>%
+  filter(maintenance_related == "1") %>%
+  rename(property = business_name) %>%
+  select(property:review_detail) %>%
+    mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
+         client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
+
+one_star <- reviews_maint_related %>% 
+  count(client_location_id) 
+
+
+#Reactable
+#----
+reactable(summary,pagination = T, filterable = T, bordered = T, highlight = T,
+    defaultColDef = colDef(align = "center",headerStyle = list(background = "#f7f7f8"),cell = function(value) format(value, nsmall = 2)),
+    columns = list(
+       location = colDef(name = "Property"),
+       weighted_z_scores = colDef(name = "Weighted \n Z Score")))
+#----
+
+#ggbarplot
+summary %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num <= 10 | row_num >= max(row_num-10)) %>%
+  mutate(group = ifelse(row_num <= 10, "low","high")) %>%
+  ggbarplot(x = "location", y = "weighted_z_scores",
+          fill = "group",           # change fill color by mpg_level
+          color = "white",            # Set bar border colors to white
+          palette = c('#90ee90',"#cc0000"),            # jco journal color palett. see ?ggpar
+          sort.val = "desc",          # Sort the value in descending order
+          sort.by.groups = FALSE,     # Don't sort inside each group
+          x.text.angle = 0,          # Rotate vertically x axis texts
+          ylab = "Time to complete z-score",
+          xlab = "",
+          legend = "none",
+          legend.title = "",
+          rotate = TRUE,
+          ggtheme = theme_minimal(),
+          title = "Top and Bottom 10 Properties"
+          ) 
+
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  #filter(subcategory != "Voicemail") %>%
+     #filter(urgency == "Urgent") %>%
+  group_by(location) %>%
+  mutate(total = n()) %>%
+  ungroup() %>%
+  group_by(yardi,category,subcategory) %>% 
+  summarise(count = n(),
+            total_tasks = mean(total),
+            avg_time_to_complete = mean(time_to_complete),
+            log = log(avg_time_to_complete+1))%>% 
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = mean(avg_time_to_complete),
+         sd_of_subcategory = sd(avg_time_to_complete),
+         og_zscore = (avg_time_to_complete - mean(avg_time_to_complete))/sd(avg_time_to_complete),
+         new_zscore = ((log-mean(log))/sd(log)),
+         zscore_weighted = new_zscore * (count/total_tasks)) %>%
+  filter(!is.na(og_zscore))%>%
+  ungroup() %>%
+  group_by(yardi) %>%
+  summarise(weighted_z_scores = round(sum(zscore_weighted),2))%>%
+  arrange(desc(weighted_z_scores))  %>%
+  filter(!is.nan(weighted_z_scores)) 
+
+reviews_maint_related <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_20200401_thru_20200601.csv", colClasses = "character") %>% 
+  clean_names() %>%
+  filter(rating == 1) %>%
+  filter(maintenance_related == "1") %>%
+  rename(property = business_name) %>%
+  select(property:review_detail) %>%
+    mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
+         client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
+
+one_star <- reviews_maint_related %>% 
+  group_by(review_detail) %>%
+  arrange(desc(review_time)) %>%
+  filter(row_number() %in% c(1)) %>%
+  ungroup() %>%
+  count(client_location_id) 
+
+summary <- left_join(summary, one_star, by = c("yardi"="client_location_id"))
+summary <- left_join(summary, dimprop, by = c("yardi" = "property_code"))
+summary$n <- ifelse(is.na(summary$n),0,summary$n) 
+
+
+x <- summary %>%
+  filter(!is.na(region)) %>%
+  ggplot(aes(x = weighted_z_scores, y = n, col = region, group = 1, text = paste("Property:",property_name))) +
+  geom_point() + 
+  theme_light() + 
+  labs(y = "Maintenance Related 1-Star Reviews", x = "Weighted Z-score", title = "Weighted Z-Scores and Number of 1-Star Maintenance Reviews", subtitle = "All Tasks")  +
+  theme(legend.title = element_blank())
+
+ggplotly(x, tooltip = "text") 
+```
+
+### 3) Expected vs Actual Task Days
+#### Data: closed, non urgent maintenance tasks after 2020-04-01 for properties with > 100 units
+*Hover cursor to identify property*
+```{r expected v actual task days, echo = F, warning = F, message = F, fig.height=8, fig.width=11}
+#include open positions
+
+#Maintenance headcount
+headcount <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/maintenance_head_count.xlsx", sheet = "Sheet2", col_types = "text") %>% 
+  clean_names() %>% 
+  rename(employee_id = row_labels) %>%
+  filter(employee_id != "Grand Total") %>% 
+  filter(!is.na(yardi)) %>%
+  mutate(average_hours = as.numeric(average_hours))
+
+headcount$dept_number <- ifelse(nchar(headcount$dept_number)==1, paste0("00",headcount$dept_number),headcount$dept_number)
+headcount$dept_number <- ifelse(nchar(headcount$dept_number)==2, paste0("0",headcount$dept_number),headcount$dept_number)
+
+headcount_summary <- headcount %>%
+  group_by(yardi) %>%
+  summarise(count = n(),
+            avg_hours = mean(average_hours))
+
+
+#Open positions
+ops_open <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Open Jobs Report") %>% 
+  clean_names() %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num != 1) %>%
+  filter(row_num != 2) %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(!is.na(location_name)) %>% 
+  select(location_name:requisition_id) %>%
+  filter(grepl("Maintenance", job_posting_title)) %>%
+  select(location_name,job_posting_title)
+
+ops_freeze <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Positions No Req LUIn") %>% 
+  clean_names() %>%
+  mutate(row_num = row_number()) %>%
+  row_to_names(2) %>%
+  rename(row_num = '2') %>%
+  filter(row_num != 3) %>%
+  clean_names() %>%
+  filter(!is.na(location_name)) %>% 
+  select(location_name:number_of_positions) %>%
+  filter(grepl("Maintenance", open_position_title)) %>%
+  select(location_name, open_position_title) %>%
+  rename(job_posting_title = open_position_title)
+
+open <- rbind(ops_open,ops_freeze)
+
+#change names
+open$location_name <- ifelse(open$location_name =="Avondale at Warner Center","Avondale @ Warner Center",open$location_name)
+open$location_name <- ifelse(open$location_name =="Ellington Bellevue","Ellington at Bellevue",open$location_name)
+open$location_name <- ifelse(open$location_name =="Highlands at Wynhaven","The Highlands at Wynhaven",open$location_name)
+open$location_name <- ifelse(open$location_name =="Bridgeport","Bridgeport Apt Homes",open$location_name)
+open$location_name <- ifelse(open$location_name =="Fourth and U","Fourth & U",open$location_name)
+open$location_name <- ifelse(open$location_name =="Mylo","Mylo Santa Clara", open$location_name)
+open$location_name <- ifelse(open$location_name =="Mylo","Mylo Santa Clara", open$location_name)
+open$location_name <- ifelse(open$location_name =="The Landing JLS","The Landing at Jack London Square", open$location_name)
+open$location_name <- ifelse(open$location_name =="Hillcrest Park","Hillcrest Park Apartments", open$location_name)
+open$location_name <- ifelse(open$location_name =="Park Hill at Issaquah","Park Hill Apartments", open$location_name)
+
+
+open <- left_join(open, dimprop, by = c("location_name"="property_name")) %>%
+  filter(!is.na(property_code)) 
+
+open <- open %>%
+  group_by(property_code) %>%
+  summarise(count = n())
+
+#budgeted positions
+ss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Same Store") %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(grepl("\\(",property)) %>%
+  separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
+  mutate(property_code = gsub(")","",property_code)) %>%
+  select(property, property_code, contains("ainten")) %>% 
+  gather(3:7, key = "key",value = "value") %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(property_code) %>%
+  summarise(budget = sum(value))
+
+
+jv <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Total JV") %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(grepl("\\(",property)) %>%
+  separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
+  mutate(property_code = gsub(")","",property_code)) %>%
+  select(property, property_code, contains("ainten")) %>% 
+  gather(3:7, key = "key",value = "value") %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(property_code) %>%
+  summarise(budget = sum(value))
+
+nss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Non Same Store") %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(grepl("\\(",property)) %>%
+  separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
+  mutate(property_code = gsub(")","",property_code)) %>%
+  select(property, property_code, contains("ainten")) %>% 
+  gather(3:7, key = "key",value = "value") %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(property_code) %>%
+  summarise(budget = sum(value))
+
+budget <- rbind(ss,jv)
+budget <- rbind(budget,nss)
+
+ov <- left_join(budget,open, by = "property_code") %>%
+  mutate(count = ifelse(is.na(count),0,count))%>%
+  mutate(omv = count/budget) %>%
+  mutate(omv = ifelse(is.nan(omv),0,omv))
+
+maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date, maintenance$created_date, units = "days"))
+maintenance$yardi <- ifelse(nchar(maintenance$yardi)==1,paste0("00",maintenance$yardi),maintenance$yardi)
+maintenance$yardi <- ifelse(nchar(maintenance$yardi)==2,paste0("0",maintenance$yardi),maintenance$yardi)
+
+median_prop_size <- median(dimprop$reporting_unit_count, na.rm = T)
+
+
+#SUMMARIZE THE MAINTENANCE DATA (using median)
+#number low b/c > 100 units, no leaseups, minus two sold properties and many properties not shown in the budget that Robin sent?
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  group_by(category,subcategory) %>%
+  mutate(portfolio_avg_time = median(time_to_complete)) %>% #CHANGE TO MEDIAN OR MEAN
+  ungroup() %>%
+  group_by(location,category,subcategory) %>% 
+  summarise(count = n(),
+            units = mean(units),
+            property_avg_time = median(time_to_complete), #CHANGE TO MEDIAN OR MEAN
+            portfolio_avg_time = mean(portfolio_avg_time), #KEEP AS MEAN, THIS IS THE MEDIAN MEASURE BUT MEAN OF 1 NUMBER IS ITESELF
+            count_per_month_per_hundred_units = ((count/2)/units)*median_prop_size) %>% #relace with median property size  #April 1 - May 24 
+  mutate(expected_task_days = portfolio_avg_time * count_per_month_per_hundred_units,
+         actual_task_days = property_avg_time * count_per_month_per_hundred_units) %>%
+  filter(units > 100) %>%
+  ungroup() %>%
+  group_by(location) %>%
+  summarise(expected_total = sum(expected_task_days),
+            actual_total = sum(actual_task_days),
+            less = actual_total < expected_total)
+
+reviews_maint_related <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_20200401_thru_20200601.csv", colClasses = "character") %>% 
+  clean_names() %>%
+  filter(rating == 1) %>%
+  filter(maintenance_related == "1") %>%
+  rename(property = business_name) %>%
+  select(property:review_detail) %>%
+    mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
+         client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
+
+one_star <- reviews_maint_related %>% 
+  count(client_location_id) 
+
+
+summary <- left_join(summary,mapping,by = c("location"="community_name")) #%>% filter(!is.na(region))
+summary$yardi <- ifelse(nchar(summary$yardi)==1,paste0("00",summary$yardi),summary$yardi)
+summary$yardi <- ifelse(nchar(summary$yardi)==2,paste0("0",summary$yardi),summary$yardi)
+summary <- summary %>% left_join(headcount_summary, by = "yardi")
+summary <- summary %>% left_join(ov, by=c("yardi"="property_code"))
+summary <- summary %>% left_join(one_star, by = c("yardi" = "client_location_id"))
+summary$n <- ifelse(is.na(summary$n),0,summary$n)
+summary$maint_per_100 <- (summary$count.x/summary$reporting_unit_count) * 100
+summary <- summary %>% filter(!is.na(omv))
+
+summary$diff <- summary$expected_total - summary$actual_total
+
+# summary %>%
+#   select(location, diff, city) %>%
+#   group_by(city) %>%
+#   arrange(diff) %>% 
+#   arrange(city) %>%
+#   View()
+
+reg <- lm(actual_total ~ expected_total,data=summary)
+summary$residuals <- round(reg$residuals,2)
+
+# summary %>%
+#   dplyr::arrange(submarket, residuals) %>%
+#   filter(region.x == "Seattle Metro") %>%
+#   select(location, submarket, residuals, units) %>% View()
+
+summary$prop_sub <- paste0(summary$location,"-",summary$submarket)
+summary$prop_region <- NA
+summary$prop_region <- ifelse(summary$region=="Seattle Metro", paste0(summary$location,"-PNW"),summary$prop_region)
+summary$prop_region <- ifelse(summary$region == "Northern California", paste0(summary$location, "-NCAL"), summary$prop_region)
+summary$prop_region <- ifelse(summary$region == "Southern California", paste0(summary$location, "-SCAL"), summary$prop_region)
+
+outliers <- summary %>% filter(location == "Brookside Oaks" | location == "The Blake LA" | location == "The Commons" | location == "416 on Broadway" | location == "The Stuart at Sierra Madre Villa")
+
+d <- list(
+  x = outliers$expected_total,
+  y = outliers$actual_total,
+  text = outliers$prop_region,
+  xref = "x",
+  yref = "y",
+  #showarrow = TRUE,
+  #arrowhead = 7,
+  ax = -20,
+  ay = 25
+)
+
+outliers <- summary %>% filter(location == "The Dylan")
+
+e <- list(
+  x = outliers$expected_total,
+  y = outliers$actual_total,
+  text = outliers$prop_region,
+  xref = "x",
+  yref = "y",
+  #showarrow = TRUE,
+  #arrowhead = 7,
+  ax = 28,
+  ay = -25
+)
+
+summary2 <- summary %>% 
+  rename("Maintenance Workers per 100 Units" = maint_per_100,
+         "Operational Maintenance Vacancy" = omv)
+summary2$pct_of_exp <- summary2$actual_total/summary2$expected_total
+
+
+plot <- ggplot(summary2,aes(x = expected_total, y = actual_total, col = `Operational Maintenance Vacancy`, group = 1, text = paste("Property: ", location, "<br>Region: ", region,"<br>Submarket: ",submarket, "<br>Units: ",reporting_unit_count))) +
+  geom_point() +
+  #geom_abline(intercept = 0, slope = 1, color = "red", size = 0.5, linetype = "longdash") + 
+  geom_smooth(data=subset(summary2, `Operational Maintenance Vacancy` >= 0.1), method='lm',se=F,formula = y~x, linetype = "longdash", size = 0.5, color = "red") +
+  geom_smooth(data=subset(summary2, `Operational Maintenance Vacancy` <= 0.1), method='lm',se=F, formula = y~x, linetype = "longdash", size = 0.5, color = "darkgreen") +
+  labs(title = "Expected vs Actual Task Days - Non-Urgent", subtitle = "per median units per month")+
+  xlab("Expected Total Task Days") +
+  ylab("Actual Total Task Days") +
+  #scale_color_manual(values = c("#FE9666","#8AD4EB","#01B8AA"))+
+  #theme_light() +
+  theme(legend.title = element_blank()) 
+
+#what are the slopes of the regression lines?
+reg1 <- lm(actual_total ~ expected_total,data=subset(summary2, `Operational Maintenance Vacancy` >= 0.1))
+
+reg2 <- lm(actual_total ~ expected_total,data=subset(summary2, `Operational Maintenance Vacancy` < 0.1))
+
+
+mid = mean(summary2$`Operational Maintenance Vacancy`)
+
+plot <- plot + 
+  scale_color_gradient(low = '#90ee90',high = "#cc0000", space = "Lab") 
+
+ggplotly(plot, tooltip = "text") %>%
+  #layout(annotations = a) %>%
+  #layout(annotations = b) %>% 
+  #layout(annotations = c) %>%
+  layout(annotations = d) %>%
+  layout(annotations = e) %>%
+  layout(title = list(text = paste0('Expected vs Actual Task Days - Non-Urgent',
+                                    '<br>',
+                                    '<sup>',
+                                    'per median units per month',
+                                    '<br>',
+                                    'Slope for > 10% OMV - 2.13 | Slope for < 10% OMV - 1.26',
+                                    '</sup>')))
+```
+
+#### Identify which properties in same area have different actual/expected task ratios
+*click property for more details*
+```{r map, echo = F, warning = F, results='asis'}
+to_map <- left_join(summary2,dimprop, by = c("yardi"="property_code"))
+
+pal <- colorNumeric(
+  palette = c("#90ee90","#d3d3d3","#cc0000"),
+  domain = summary2$pct_of_exp)
+
+leaflet(to_map) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addCircleMarkers(lng = to_map$longitude, lat = to_map$latitude, radius = 6,weight = 1, fillOpacity = 0.8, fillColor = ~pal(pct_of_exp), label = to_map$location, popup=paste("Property:", to_map$location, "<br>",
+                         "Actual/Expected:", round(to_map$pct_of_exp,2), "<br>",
+                         "Units:", to_map$reporting_unit_count), color = "black") %>%
+  addLegend(pal = pal,
+            #colors = c("#b60a1c","#ff684c","#8ace7e","#309143"),
+            values = to_map$pct_of_exp,
+            title = "Actual/Expected Tasks Days")
+            #labels = c("0-25th","25th-50th","50th-75th","75th-100th"))
+
+```
+
+#### Identify tasks skewing actual task days for individual properties
+```{r task breakdown, echo = F, warning = F, message = F}
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  group_by(category,subcategory) %>%
+  mutate(portfolio_avg_time = median(time_to_complete)) %>% #MEDIAN OR MEAN
+  ungroup() %>%
+  group_by(location,category,subcategory) %>% 
+  summarise(count = n(),
+            units = mean(units),
+            property_avg_time = median(time_to_complete),
+            portfolio_avg_time = mean(portfolio_avg_time),
+            count_per_month_per_hundred_units = ((count/total_months)/units)*median_prop_size) %>% #April 1 - May 31 
+  mutate(expected_task_days = portfolio_avg_time * count_per_month_per_hundred_units,
+         actual_task_days = property_avg_time * count_per_month_per_hundred_units) %>%
+  ungroup() %>%
+  group_by(location) %>%
+  mutate(total_actual = sum(actual_task_days)) %>%
+  ungroup() %>%
+  mutate(pct_of_total = actual_task_days/total_actual) %>%
+  filter(units > 5) %>%
+  select(-total_actual)
+
+reactable(summary,pagination = T, filterable = T, style = list(fontSize = "10px"), wrap = F,resizable = T, compact = T, fullWidth = F, bordered = T, highlight = T, groupBy = c("location"),
+    defaultColDef = 
+      colDef(align = "center",
+             headerStyle = list(background = "#f7f7f8")
+             #cell = function(value) ifelse(is.numeric(value),round(value,2),value)
+             ),
+          columns = list(
+            location = colDef(name = "Property"),
+            category = colDef(name = "Category"),
+            subcategory = colDef(name = "Subcategory"),
+            count = colDef(name = "# of \n Occurrences"),
+            units = colDef(name = "Units"),
+            property_avg_time = colDef(name = "Property Median Time", format = colFormat(digits = 2)),
+            portfolio_avg_time = colDef(name = "Portfolio Median Time",format = colFormat(digits = 2)),
+            count_per_month_per_hundred_units = colDef(name = "Count per Month per \n Median Units",format = colFormat(digits = 2)),
+            expected_task_days = colDef(name = "Normalized Expected Task Days per Month",format = colFormat(digits = 2)),
+            actual_task_days = colDef(name = "Normalized Actual Task Days per Month",format = colFormat(digits = 2)),
+            pct_of_total = colDef(name = "% of Total Actual Task Days", format = colFormat(percent = T, digits = 2))))
+
+
+
+# ggplot(summary, aes(x = `Maintenance Workers per 100 Units`, y = actual_total)) +
+#   geom_point() +
+#   xlab("Maintenance Workers per 100 Units") +
+#   ylab("Actual Task Days") +
+#   stat_smooth(method = "lm") +
+#   theme_light()
+```
+
+#### Operational Maintenance Vacancy by Property 
+```{r omv, echo = F, message = F, warning = F}
+summary2 %>%
+  select(location, budget, count.y, `Operational Maintenance Vacancy`,pct_of_exp) %>%
+  reactable(pagination = T, filterable = T, bordered = T, highlight = T,
+    defaultColDef = 
+      colDef(align = "center",
+             headerStyle = list(background = "#f7f7f8")
+             #cell = function(value) ifelse(is.numeric(value),round(value,2),value)
+             ),
+          columns = list(
+            location = colDef(name = "Property"),
+            budget = colDef(name = "Budgeted Maintenance Positions"),
+            count.y = colDef(name = "Open Maintenance Positions"),
+            `Operational Maintenance Vacancy` = colDef(name = "Operational Maintenance Vacancy", format = colFormat(percent = T, digits = 0)),
+            pct_of_exp = colDef(name = "Actual Task Days as \npct of Expected", format = colFormat(percent = T, digits = 0))))
+```
+
+```{r reviews analysis, echo = F, warning = F, message= F}
+
+#all reviews
+reviews <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_thru_2020_05_29.csv", colClasses = "character") %>% janitor::clean_names() %>%
+  rename(property = i_business_name) %>%
+  select(property:review_detail) %>%
+    mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
+         client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
+
+#reviews since 04-01-2020
+# ~25% of 1 start reviews were in some way related to poor maintenance
+reviews_maint_related <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_20200401_thru_20200601.csv", colClasses = "character") %>% 
+  clean_names() %>%
+  filter(rating == 1) %>%
+  filter(maintenance_related == "1") %>%
+  rename(property = business_name) %>%
+  select(property:review_detail) %>%
+    mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
+         client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
+
+one_star <- reviews_maint_related %>% 
+  count(property) %>% View() 
+
+
+#Get property information
+#----
+library(DBI)
+con3 <- dbConnect(odbc::odbc(), Driver = "SQL Server", Server = "essexBI.essexpropertytrust.com", 
+                  database = "Dimensions", Trusted_Connection = "True", pwd = "Newhire3915!", 
+                  UID = "phummelt", Port = 1433)
+
+dimprop <- dbGetQuery(con3, 'SELECT *  
+                 FROM Dimensions.dim.Property ') %>% clean_names() 
+
+dbDisconnect(con3)
+#----
+
+
+#any dupes?
+reviews %>%
+  group_by(review_id) %>%
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>%
+  View()
+
+#avg. review score by property 
+#portoflio mean 3.31
+#portfolio median 4
+reviews_summary <- reviews %>%
+  group_by(client_location_id) %>%
+  summarise(mean_score = mean(as.numeric(rating),na.rm = T),
+            median_score = median(as.numeric(rating), na.rm = T))
+
+maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date, maintenance$created_date, units = "days"))
+
+  
+#WEIGHTED Z SCORES AND MEAN REVIEW SCORE (NON-URGENT)
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  group_by(yardi) %>%
+  mutate(total = n()) %>%
+  ungroup() %>%
+  group_by(yardi,category,subcategory) %>% 
+  summarise(count = n(),
+            total_tasks = mean(total),
+            avg_time_to_complete = mean(time_to_complete),
+            log = log(avg_time_to_complete+1)) %>% 
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = mean(avg_time_to_complete),
+         sd_of_subcategory = sd(avg_time_to_complete),
+         og_zscore = (avg_time_to_complete - mean(avg_time_to_complete))/sd(avg_time_to_complete),
+         new_zscore = ((log-mean(log)))/sd(log),
+         zscore_weighted = new_zscore * (count/total_tasks)) %>%
+  ungroup() %>%
+  group_by(yardi) %>%
+  summarise(weighted_z_scores = round(sum(zscore_weighted),2)) %>%
+  arrange(desc(weighted_z_scores))  %>%
+  filter(!is.nan(weighted_z_scores)) 
+
+#MEDIAN - how to work around MAD of 0 for many subcategories
+#----
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  group_by(yardi) %>%
+  mutate(total = n()) %>%
+  ungroup() %>%
+  group_by(yardi,category,subcategory) %>% 
+  mutate(med_time_to_complete = median(time_to_complete),
+            log = log(med_time_to_complete+1)) %>% 
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(med_of_subcategory = median(log),
+         mad_of_subcategory = mad(log)) %>%
+  ungroup() %>%
+  group_by(yardi, category, subcategory) %>%
+  summarise(count = n(),
+            total = mean(total),
+            med_time_to_complete = mean(med_time_to_complete),
+            log = mean(log),
+            med_of_subcategory = mean(med_of_subcategory),
+            mad_of_subcategory = mean(mad_of_subcategory)
+            ) %>%
+  ungroup() %>%
+  mutate(
+         new_zscore = 0.6745*(log-med_of_subcategory)/mad_of_subcategory,
+         zscore_weighted = new_zscore * (count/total)) %>%
+  ungroup() %>%
+  group_by(yardi) %>%
+  summarise(weighted_z_scores = round(sum(zscore_weighted),2)) %>%
+  arrange(desc(weighted_z_scores))  %>%
+  filter(!is.nan(weighted_z_scores))
+#----
+
+reviews_to_time <- left_join(reviews_summary,summary, by = c("client_location_id"="yardi"))
+
+ggplot(reviews_to_time,aes(x = weighted_z_scores, y = mean_score)) +
+  geom_point() + 
+  geom_smooth(method = lm) + 
+  labs(x = "Weighted Z-Score",y = "Mean Review", title = "Time to Complete Z-Scores and Avg. Online Review", subtitle = "Non-Urgent Tasks")
+
+
+  
+#WEIGHTED Z SCORES AND MEAN REVIEW SCORE (URGENT)
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  #filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Urgent") %>%
+  group_by(yardi) %>%
+  mutate(total = n()) %>%
+  ungroup() %>%
+  group_by(yardi,category,subcategory) %>% 
+  summarise(count = n(),
+            total_tasks = mean(total),
+            avg_time_to_complete = mean(time_to_complete),
+            log = log(avg_time_to_complete+1))%>% 
+  ungroup() %>%
+  group_by(category,subcategory) %>%
+  mutate(mean_of_subcategory = mean(avg_time_to_complete),
+         sd_of_subcategory = sd(avg_time_to_complete),
+         og_zscore = (avg_time_to_complete - mean(avg_time_to_complete))/sd(avg_time_to_complete),
+         new_zscore = ((log-mean(log))/sd(log)),
+         zscore_weighted = new_zscore * (count/total_tasks)) %>%
+  filter(!is.na(og_zscore))%>%
+  ungroup() %>%
+  group_by(yardi) %>%
+  summarise(weighted_z_scores = round(sum(zscore_weighted),2))%>%
+  arrange(desc(weighted_z_scores))  %>%
+  filter(!is.nan(weighted_z_scores))
+
+reviews_to_time <- left_join(reviews_summary,summary, by = c("client_location_id"="yardi"))
+  
+ggplot(reviews_to_time,aes(x = weighted_z_scores, y = mean_score)) +
+  geom_point() + 
+  geom_smooth(method = lm) + 
+  labs(x = "Weighted Z-Score",y = "Mean Review", title = "Time to Complete Z-Scores and Avg. Online Review", subtitle = "Urgent Tasks")
+
+
+#Simple Avg. Time to Complete and Reviews (URGENT)
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  #filter(subcategory != "Voicemail") %>% MOST ARE VOICEMAILS SO FILTER OUT
+     filter(urgency == "Urgent") %>%
+  group_by(yardi) %>%
+  summarise(avg_time = mean(time_to_complete))
+
+reviews_to_time <- left_join(reviews_summary,summary, by = c("client_location_id"="yardi"))
+
+ggplot(reviews_to_time,aes(x = avg_time, y = mean_score)) +
+  geom_point() + 
+  geom_smooth(method = lm) + 
+  labs(x = "Mean Days to Complete",y = "Mean Review", title = "Mean Times to Complete and Avg. Online Review", subtitle = "Urgent Tasks")
+
+#ACTUAL TIME TO COMLETE AND MEAN ONLINE SCORES
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Not Urgent") %>%
+  group_by(category,subcategory) %>%
+  mutate(portfolio_avg_time = median(time_to_complete)) %>% #CHANGE TO MEDIAN OR MEAN
+  ungroup() %>%
+  group_by(location,category,subcategory) %>% 
+  summarise(count = n(),
+            units = mean(units),
+            property_avg_time = median(time_to_complete), #CHANGE TO MEDIAN OR MEAN
+            portfolio_avg_time = mean(portfolio_avg_time), #KEEP AS MEAN, THIS IS THE MEDIAN MEASURE BUT MEAN OF 1 NUMBER IS ITESELF
+            count_per_month_per_hundred_units = ((count/1.75)/units)*median_prop_size) %>% #relace with median property size  #April 1 - May 24 
+  mutate(expected_task_days = portfolio_avg_time * count_per_month_per_hundred_units,
+         actual_task_days = property_avg_time * count_per_month_per_hundred_units) %>%
+  filter(units > 2) %>%
+  ungroup() %>%
+  group_by(location) %>%
+  summarise(expected_total = sum(expected_task_days),
+            actual_total = sum(actual_task_days),
+            less = actual_total < expected_total) 
+
+summary <- left_join(summary,mapping,by = c("location"="community_name")) #%>% filter(!is.na(region))
+summary$yardi <- ifelse(nchar(summary$yardi)==1,paste0("00",summary$yardi),summary$yardi)
+summary$yardi <- ifelse(nchar(summary$yardi)==2,paste0("0",summary$yardi),summary$yardi)
+summary <- summary %>% left_join(headcount_summary, by = "yardi")
+summary <- summary %>% left_join(ov, by=c("yardi"="property_code"))
+summary$actual_over_expected <- summary$actual_total/summary$expected_total
+
+reviews_to_time <- left_join(reviews_summary,summary, by = c("client_location_id"="yardi"))
+
+reviews_to_time %>%
+  filter(!is.na(actual_over_expected)) %>%
+  arrange(desc(actual_over_expected)) %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num >= max(row_num)-10) %>%
+  summarise(mean = mean(mean_score))
+
+ggplot(reviews_to_time,aes(x = actual_over_expected, y = mean_score)) +
+  geom_point() + 
+  geom_smooth(method = lm) + 
+  labs(x = "Ratio of Normalized Actual to Expected Task Days per Month",y = "Mean Review Score", title = "Ratio of Normalized Actual to Expected Task Days per Month and Review Scores", subtitle = "Not Urgent Tasks")
+
+```
+
+```{r huge times to complete, echo = F, warning = F}
+#what are the huge times to complete?
+test <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+          source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+  arrange(desc(time_to_complete)) %>% 
+  select(location, category, subcategory, status, created_date, closed_date, time_to_complete, urgency)
+```
+
+```{r maintenance efficiency, echo = F, warning = F}
+#maintenance efficiency 
+headcount <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/maintenance_head_count.xlsx", sheet = "Sheet2", col_types = "text") %>% 
+  clean_names() %>% 
+  rename(employee_id = row_labels) %>%
+  filter(employee_id != "Grand Total") %>% 
+  filter(!is.na(yardi))
+
+headcount$dept_number <- ifelse(nchar(headcount$dept_number)==1, paste0("00",headcount$dept_number),headcount$dept_number)
+headcount$dept_number <- ifelse(nchar(headcount$dept_number)==2, paste0("0",headcount$dept_number),headcount$dept_number)
+
+hours_worked <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/maintenance_head_count.xlsx", sheet = "Sheet3", col_types = "text") %>%
+  clean_names() %>% 
+  rename(employee_id = row_labels) %>%
+  filter(employee_id != "Grand Total") %>%
+  filter(admin_maint == "Maintenance") %>%
+  fill(dept_number, .direction = c("down")) %>%
+  separate(calculated_date, into = c("week_day","month", "day","year")) %>%
+  mutate(month_num = ifelse(month=="April","04","05"),
+         day = ifelse(nchar(day)==1,paste0("0",day),day)) %>%
+  mutate(date = paste0(year,"-",month_num,"-",day),
+         date = as.Date(date))
+hours_worked$dept_number <- ifelse(nchar(hours_worked$dept_number)==1, paste0("00",hours_worked$dept_number),hours_worked$dept_number)
+hours_worked$dept_number <- ifelse(nchar(hours_worked$dept_number)==2, paste0("0",hours_worked$dept_number),hours_worked$dept_number)
+
+
+dept_to_yardi <- headcount %>% select(dept_number, yardi) %>% unique()
+
+#april 1 - may 1
+hours_worked_by_prop <- left_join(hours_worked, dept_to_yardi, by = c("dept_number")) %>%
+  mutate(hours_worked = as.numeric(hours_worked)) %>%
+  filter(date <= "2020-05-31") %>% 
+  group_by(yardi) %>% 
+  summarise(sum_hours = sum(hours_worked)) %>%
+  filter(!is.na(yardi))
+
+names_and_yardi <- dimprop %>% select(property_code, property_name, region)
+
+closed_tasks_by_prop <- maintenance %>%
+  group_by(yardi) %>%
+  summarise(count = n()) %>%
+  left_join(hours_worked_by_prop, by = "yardi") %>%
+  left_join(names_and_yardi, by = c("yardi"="property_code")) %>%
+  filter(!is.na(region))
+
+plot <- ggplot(closed_tasks_by_prop, aes(x = sum_hours, y = count, col = region, group = 1, text = paste("Property: ", property_name))) +
+  geom_point() +
+  geom_smooth(method = lm) + 
+  labs(y = "Total Maintenance Tasks Completed", x = "Sum of Hours Worked", title = "Total Tasks Completed and Sum of Maintenance Hours Worked") + 
+  geom_vline(xintercept = mean(closed_tasks_by_prop$sum_hours, na.rm = T)) +
+  geom_hline(yintercept = mean(closed_tasks_by_prop$count)) +
+  theme(legend.title = element_blank())
+
+ggplotly(plot, tooltip = "text") %>%
+  layout(title = list(text = paste0('Total Tasks Completed and Sum of Maintenance Hours Worked',
+                                    '<br>',
+                                    '<sup>',
+                                    'since April 1')))
+
+reg3 <- lm(sum_hours ~ count, data = closed_tasks_by_prop)
+
+maintenance %>% 
+  ungroup() %>%
+  count(assignee) %>% View()
+
+
+```
+
+```{r replication of maintenance KPI, echo = F, warning = F}
+#not as straightforward to replicate. Must filter for modified date only if it was modified in April or before, cannot use modified dates outside of month of interest 
+
+all_maintenance <- tasks %>%
+  filter(created_date >= "2020-04-01" & created_date < "2020-05-01") %>%
+  filter((closed_date >= "2020-04-01" & closed_date < "2020-05-01") | is.na(closed_date))
+
+all_maintenance %>% 
+  group_by(location, status) %>%
+  summarise(count = n()) %>% View()
+
+```
+
+```{r expected versus man days}
+#use resident reported only - non resident reported not on the same time zone
+summary <- maintenance %>% 
+  group_by(location) %>%
+  mutate(all_task_count = n()) %>% #all closed maintenance tasks
+  ungroup %>%
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  #filter(subcategory != "Voicemail") %>%
+  #filter(urgency == "Not Urgent") %>%
+  group_by(category,subcategory) %>%
+  mutate(portfolio_avg_time = mean(time_to_complete)) %>% #CHANGE TO MEDIAN OR MEAN
+  ungroup() %>%
+  group_by(location,category ,subcategory) %>% 
+  summarise(resident_count = n(),
+            units = mean(units),
+            all_task_count = mean(all_task_count),
+            portfolio_avg_time = mean(portfolio_avg_time),
+            property_avg_time = mean(time_to_complete),
+            count_per_week = (resident_count/total_time)*7) %>% #April 1 - May 31
+  mutate(expected_task_days = portfolio_avg_time * count_per_week,
+         actual_task_days = property_avg_time * count_per_week,
+         all_task_count_per_unit = all_task_count/units) %>%
+  ungroup() %>%
+  group_by(location) %>%
+  summarise(expected_total = sum(expected_task_days),
+            actual_total = sum(actual_task_days),
+            efficiency = actual_total/expected_total,
+            all_task_count_per_unit = mean(all_task_count_per_unit)) %>%
+  mutate(log = log(expected_total)) %>%
+  mutate(expected_total_z_score = (log - mean(log))/sd(log))
+
+summary <- left_join(summary,mapping,by = c("location"="community_name")) 
+summary$yardi <- ifelse(nchar(summary$yardi)==1,paste0("00",summary$yardi),summary$yardi)
+summary$yardi <- ifelse(nchar(summary$yardi)==2,paste0("0",summary$yardi),summary$yardi)
+summary <- summary %>% 
+  left_join(headcount_summary, by = "yardi") %>%
+  mutate(reporting_unit_count = as.numeric(reporting_unit_count)) %>%
+  mutate(man_days_per_week = (count*7),
+         man_hours_per_week_per_unit = (avg_hours*7*count)/reporting_unit_count,
+         actual_over_expected = actual_total/expected_total)
+
+ggplot(summary, aes(x = reporting_unit_count, y = man_days_per_week)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+
+#work quanitity and efficiency measures
+#----
+#MAN DAYS PER WEEK on EXPECTED TASK DAYS per WEEK
+plot <- summary %>%
+  rename("Expected Task Days Z-Score" = expected_total_z_score) %>%
+  filter(operation_status != "Non Stabilized") %>%
+    ggplot(aes(x = expected_total, y = man_days_per_week, group = 1, text = paste("Property: ",location,'<br>Submarket: ', submarket, "<br>Units: ", reporting_unit_count), col  = `Expected Task Days Z-Score`, size = reporting_unit_count)) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  labs(x = "Expected Task Days per Week", y = "Available Maintenance Days per Week", title = "Availalble Maintenance Work Days per Week and Avg. Expected Task Days",subtitle = "Expected total based on resident reported tasks only") +
+  scale_color_gradient2(low = "green", mid = "lightgrey", high = "red") +
+  scale_size_continuous(range = c(0.5, 4.5)) + 
+  theme_light()
+
+outliers <- summary %>% 
+  filter(location == "Expo" | location == "The Carlyle" | location == "Camarillo Oaks" | location == "Ashton Sherman Village" | location == "Park Viridian" | location == "Epic" | location == "Fountain Park" | location == "Esplanade")
+
+a <- list(
+  x = outliers$expected_total,
+  y = outliers$man_days_per_week,
+  text = outliers$location,
+  xref = "x",
+  yref = "y",
+  ax = 28,
+  ay = -25
+)
+
+ggplotly(plot, tooltip = "text") %>%
+  layout(annotations = a)
+
+
+#MAN HOURS PER WEEK PER UNIT on ACTUAL/EXPECTED
+plot <- summary %>%
+  rename("Expected Task Days Z-Score" = expected_total_z_score) %>%
+  filter(operation_status != "Non Stabilized") %>%
+    ggplot(aes(x = actual_over_expected, y = man_days_per_week, group = 1, text = paste("Property: ",location,'<br>Submarket: ', submarket, "<br>Units: ", reporting_unit_count), col  = `Expected Task Days Z-Score`, size = reporting_unit_count)) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  labs(x = "Actual/Expected Avg. Task Days per Week", y = "Man Days per Week", title = "Man Hours per Week per Unit vs. Actual/Expected Avg. Task Days",subtitle = "Resident reported tasks only") +
+  scale_color_gradient2(low = "green", mid = "lightgrey", high = "red") +
+  scale_size_continuous(range = c(0.5, 4.5)) + 
+  theme_light()
+
+ggplotly(plot, tooltip = "text")
+
+
+
+#By region
+region_choice <- "Southern California"
+
+labels_subset <- summary %>%
+  filter(region == region_choice & operation_status != "Non Stabilized") %>%
+  filter(actual_over_expected > 2 | man_days_per_week > 40 | (man_days_per_week > 10 & man_days_per_week < 20 &actual_over_expected < 0.75)) %>%
+rename("Expected Task Days Z-Score" = expected_total_z_score)
+
+subset <- summary %>%
+  #filter(region == region_choice) %>%
+  filter(location != "Pinehurst Apartments") %>%
+  rename("Expected Task Days Z-Score" = expected_total_z_score,
+         "Workload (Total Tasks/Units)" = all_task_count_per_unit) %>%
+  filter(operation_status != "Non Stabilized") 
+
+#change colored as needed.
+p <- ggplot(subset, aes(x = actual_over_expected, y = man_days_per_week, group = 1, label = location, col  = `Workload (Total Tasks/Units)`, size = reporting_unit_count, text = paste("Property: ",location,'<br>Submarket: ', submarket, "<br>Units: ", reporting_unit_count))) +
+  geom_point() +
+  geom_smooth(method = "lm", show.legend = F, se = F) +
+  labs(x = "Actual/Expected Avg. Task Days", y = "Available Maintenance Days per Week", title = "Available Maintenance Days per Week vs. Resident Reported Task Completion Efficiency",caption = "", subtitle = region_choice) +
+  scale_color_gradient2(low = "green", mid = "lightgrey", high = "red", midpoint = median(subset$`Workload (Total Tasks/Units)`)) +
+  scale_size_continuous(range = c(1, 5), name = "Units") + 
+  theme_light() +
+  geom_text_repel(size = 4, col = "black",data = labels_subset) + 
+  geom_vline(xintercept = mean(subset$actual_over_expected), linetype = "longdash", col = "red") +
+  guides(
+    color = guide_colorbar(order = 1),
+    size = guide_legend(order = 0)
+  )
+
+p
+
+ggplotly(p, tooltip = "text") %>%
+    layout(title = list(text = paste0('Available Maintenance Days per Week vs. Resident Reported Task Completion Efficiency',
+                                    '<br>',
+                                    
+                                    '<sup>')))
+
+
+  
+
+#----
+
+
+#Regress maintenance days per week on expected total
+#what is the "excess man power"
+reg_data <- summary %>%
+  filter(!is.na(man_days_per_week)) 
+reg <- lm(man_days_per_week~expected_total, data = reg)
+reg_data$residuals <- reg$residuals 
+reg_data %>%
+  select(location, expected_total, man_days_per_week, residuals) %>% View()
+
+#Productivity by property 
+#recall these are closed after 2020-04-01
+productivity <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  group_by(location,yardi) %>%
+  summarise(count_per_week = (n()/60)*7) %>%
+  left_join(headcount_summary, by = "yardi") %>%
+  mutate(count_per_week_per_person = count_per_week/count) %>%
+  filter(!is.na(count_per_week_per_person))
+
+plot <- ggplot(productivity, aes(x = count_per_week_per_person)) +
+  geom_histogram(binwidth = 1) +
+  geom_vline(xintercept = mean(productivity$count_per_week_per_person), col = "red") +
+  labs(x = "Avg. Completed Tasks per Week per Maintenance Employee", y = "Property Count", title = "Maintenance Productivity")
+           
+ggplotly(plot)  
+
+#Outlier Pairs
+#----
+#LOW - Expo & The Carlyle
+set1 <- summary %>% filter(location == "Expo" | location == "The Carlyle")
+#see same task count and roughly the same composition
+set1 %>%
+  group_by(location) %>%
+  summarise(count = sum(count))
+#Productivity
+#Expo - 2.4
+#The Carlyle - 9.7
+
+#MED - Camarillo Oaks & Ashton Sherman Village
+set2 <- summary %>% filter(location == "Camarillo Oaks" | location == "Ashton Sherman Village")
+set2 %>%
+  group_by(location) %>%
+  summarise(count = sum(count))
+#Productivity
+#Camarillo Oaks - 4.0
+#Ashton Sherman village - 8.1
+
+#MED/HIGH - Epic & Park Viridian
+set3 <- summary %>% filter(location == "Park Viridian" | location == "Epic")
+set3 %>%
+  group_by(location) %>%
+  summarise(count = sum(count))
+#Productivity 
+#Epic - 3.1 (365)
+#Park Viridian - 15.3 (lax1251)
+
+#HIGH - Fountain Park & Esplanade
+set4 <- summary %>% filter(location == "Fountain Park" | location == "Esplanade")
+set4 %>%
+  group_by(location) %>%
+  summarise(count = sum(count))
+#Productivity
+#Fountain Park - 5.0
+#Esplanade - 16.5
+#----
+
+
+#Breakout by Workspace
+#----
+#by far the biggest subset of the data
+maintenance %>%
+  group_by(location) %>%
+  summarise(count_per_week = (n()/60)*7) %>% 
+  ggplot(aes(x = count_per_week)) +
+  geom_histogram(binwidth = 3) +
+  labs(title = "Avg. Maint. Tasks Completed Per Week", x = "Tasks per Week", y = "Property Count")
+
+#not a big proportion of tasks, about 850/89604  (<1%)
+tasks %>%
+  filter(workspace == "Preventive Maintenance" & created_date >= '2020-04-01') %>%
+  group_by(location) %>%
+  summarise(count_per_week = (n()/60)*7) %>% 
+  ggplot(aes(x = count_per_week)) +
+  geom_histogram(binwidth = 0.1) +
+  labs(title = "Avg. Prev. Maint. Tasks Completed Per Week", x = "Tasks per Week", y = "Property Count")
+
+#depends what properties are going through annual unit inspections. For instance Bunker Hill Towers must be because they are seeing a ton of inspections
+tasks %>%
+  filter(workspace == "Inspection" & created_date >= '2020-04-01' & status == "Closed") %>%
+  group_by(location) %>%
+  summarise(count_per_week = (n()/60)*7) %>% 
+  ggplot(aes(x = count_per_week)) +
+  geom_histogram(binwidth = 1) +
+  labs(title = "Avg.Inspection Tasks Completed Per Week", x = "Tasks per Week", y = "Property Count")
+#----
+
+```
+
+
+```{r expected v actual task days urgent, echo = F, warning = F, message = F, fig.height=10, fig.width=10, eval=F}
+#include open positions?
+headcount <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/maintenance_head_count.xlsx", sheet = "Sheet2", col_types = "text") %>% 
+  clean_names() %>% 
+  rename(employee_id = row_labels) %>%
+  filter(employee_id != "Grand Total") %>% 
+  filter(!is.na(yardi))
+
+headcount$dept_number <- ifelse(nchar(headcount$dept_number)==1, paste0("00",headcount$dept_number),headcount$dept_number)
+headcount$dept_number <- ifelse(nchar(headcount$dept_number)==2, paste0("0",headcount$dept_number),headcount$dept_number)
+
+headcount_summary <- headcount %>%
+  group_by(yardi) %>%
+  summarise(count = n())
+
+
+#map open to yardi ids
+ops_open <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Open Jobs Report") %>% 
+  clean_names() %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num != 1) %>%
+  filter(row_num != 2) %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(!is.na(location_name)) %>% 
+  select(location_name:requisition_id) %>%
+  filter(grepl("Maintenance", job_posting_title)) %>%
+  select(location_name,job_posting_title)
+
+ops_freeze <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Positions No Req LUIn") %>% 
+  clean_names() %>%
+  mutate(row_num = row_number()) %>%
+  row_to_names(2) %>%
+  rename(row_num = '2') %>%
+  filter(row_num != 3) %>%
+  clean_names() %>%
+  filter(!is.na(location_name)) %>% 
+  select(location_name:number_of_positions) %>%
+  filter(grepl("Maintenance", open_position_title)) %>%
+  select(location_name, open_position_title) %>%
+  rename(job_posting_title = open_position_title)
+
+lu_open <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Lease Up Only - Open Jobs") %>% 
+  clean_names() %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num != 1) %>%
+  filter(row_num != 2) %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(!is.na(location_name)) %>% 
+  select(location_name:requisition_id) %>%
+  filter(grepl("Maintenance", job_posting_title)) %>%
+  select(location_name, job_posting_title)
+
+lu_freeze <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Lease Up - Positions No Req") %>% 
+  clean_names() %>%
+  mutate(row_num = row_number()) %>%
+  row_to_names(2) %>%
+  rename(row_num = '2') %>%
+  filter(row_num != 3) %>%
+  clean_names() %>%
+  filter(!is.na(location_name)) %>% 
+  select(location_name:number_of_positions) %>%
+  filter(grepl("Maintenance", open_position_title)) %>%
+  select(location_name,open_position_title) %>%
+  rename(job_posting_title = open_position_title)
+
+open <- rbind(ops_open,ops_freeze)
+open <- rbind(open, lu_open)
+open <- rbind(open, lu_freeze)
+
+
+open$location_name <- ifelse(open$location_name =="Avondale at Warner Center","Avondale @ Warner Center",open$location_name)
+open$location_name <- ifelse(open$location_name =="Ellington Bellevue","Ellington at Bellevue",open$location_name)
+open$location_name <- ifelse(open$location_name =="Highlands at Wynhaven","The Highlands at Wynhaven",open$location_name)
+open$location_name <- ifelse(open$location_name =="Bridgeport","Bridgeport Apt Homes",open$location_name)
+open$location_name <- ifelse(open$location_name =="Fourth and U","Fourth & U",open$location_name)
+open$location_name <- ifelse(open$location_name =="Mylo","Mylo Santa Clara", open$location_name)
+open$location_name <- ifelse(open$location_name =="Mylo","Mylo Santa Clara", open$location_name)
+open$location_name <- ifelse(open$location_name =="The Landing JLS","The Landing at Jack London Square", open$location_name)
+open$location_name <- ifelse(open$location_name =="Hillcrest Park","Hillcrest Park Apartments", open$location_name)
+open$location_name <- ifelse(open$location_name =="Park Hill at Issaquah","Park Hill Apartments", open$location_name)
+
+library(DBI)
+con3 <- dbConnect(odbc::odbc(), Driver = "SQL Server", Server = "essexBI.essexpropertytrust.com", 
+                  database = "Dimensions", Trusted_Connection = "True", pwd = "Newhire3915!", 
+                  UID = "phummelt", Port = 1433)
+
+dimprop <- dbGetQuery(con3, 'SELECT *  
+                 FROM Dimensions.dim.Property ') %>% clean_names() 
+
+dbDisconnect(con3)
+
+open <- left_join(open, dimprop, by = c("location_name"="property_name")) %>%
+  filter(!is.na(property_code)) 
+
+open <- open %>%
+  group_by(property_code) %>%
+  summarise(count = n())
+
+#bring in budgeted positions
+ss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Same Store") %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(grepl("\\(",property)) %>%
+  separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
+  mutate(property_code = gsub(")","",property_code)) %>%
+  select(property, property_code, contains("ainten")) %>% 
+  gather(3:7, key = "key",value = "value") %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(property_code) %>%
+  summarise(budget = sum(value))
+
+
+jv <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Total JV") %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(grepl("\\(",property)) %>%
+  separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
+  mutate(property_code = gsub(")","",property_code)) %>%
+  select(property, property_code, contains("ainten")) %>% 
+  gather(3:7, key = "key",value = "value") %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(property_code) %>%
+  summarise(budget = sum(value))
+
+nss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Non Same Store") %>%
+  row_to_names(1) %>%
+  clean_names() %>%
+  filter(grepl("\\(",property)) %>%
+  separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
+  mutate(property_code = gsub(")","",property_code)) %>%
+  select(property, property_code, contains("ainten")) %>% 
+  gather(3:7, key = "key",value = "value") %>%
+  mutate(value = as.numeric(value)) %>%
+  group_by(property_code) %>%
+  summarise(budget = sum(value))
+
+budget <- rbind(ss,jv)
+budget <- rbind(budget,nss)
+
+ov <- left_join(budget,open, by = "property_code") %>%
+  mutate(count = ifelse(is.na(count),0,count))%>%
+  mutate(omv = count/budget) %>%
+  mutate(omv = ifelse(is.nan(omv),0,omv))
+
+
+maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date, maintenance$created_date, units = "days"))
+maintenance$yardi <- ifelse(nchar(maintenance$yardi)==1,paste0("00",maintenance$yardi),maintenance$yardi)
+maintenance$yardi <- ifelse(nchar(maintenance$yardi)==2,paste0("0",maintenance$yardi),maintenance$yardi)
+
+summary <- maintenance %>% 
+  filter(source == "Answering Service" | source == "Resident App (iOS)" |
+           source == "Resident App (Android)" | source == "Resident Portal") %>%
+  filter(subcategory != "Voicemail") %>%
+     filter(urgency == "Urgent") %>%
+  group_by(category,subcategory) %>%
+  mutate(portfolio_avg_time = mean(time_to_complete)) %>%
+  ungroup() %>%
+  group_by(location,category,subcategory) %>% 
+  summarise(count = n(),
+            units = mean(units),
+            property_avg_time = mean(time_to_complete),
+            portfolio_avg_time = mean(portfolio_avg_time),
+            count_per_month_per_hundred_units = ((count/1.75)/units)*100) %>% #April 1 - May 17 
+  mutate(expected_task_days = portfolio_avg_time * count_per_month_per_hundred_units,
+         actual_task_days = property_avg_time * count_per_month_per_hundred_units) %>%
+  filter(units > 100) %>%
+  ungroup() %>%
+  group_by(location) %>%
+  summarise(expected_total = sum(expected_task_days),
+            actual_total = sum(actual_task_days),
+            less = actual_total < expected_total) 
+
+summary <- left_join(summary,mapping,by = c("location"="community_name")) #%>% filter(!is.na(region))
+summary$yardi <- ifelse(nchar(summary$yardi)==1,paste0("00",summary$yardi),summary$yardi)
+summary$yardi <- ifelse(nchar(summary$yardi)==2,paste0("0",summary$yardi),summary$yardi)
+summary <- summary %>% left_join(headcount_summary, by = "yardi")
+summary <- summary %>% left_join(ov, by=c("yardi"="property_code"))
+summary$maint_per_100 <- (summary$count.x/summary$units) * 100
+summary <- summary %>% filter(!is.na(omv))
+
+summary$diff <- summary$expected_total - summary$actual_total
+
+# summary %>%
+#   select(location, diff, city) %>%
+#   group_by(city) %>%
+#   arrange(diff) %>% 
+#   arrange(city) %>%
+#   View()
+
+reg <- lm(actual_total ~ expected_total,data=summary)
+summary$residuals <- round(reg$residuals,2)
+
+# summary %>%
+#   dplyr::arrange(submarket, residuals) %>%
+#   filter(region.x == "Seattle Metro") %>%
+#   select(location, submarket, residuals, units) %>% View()
+
+summary$prop_sub <- paste0(summary$location,"-",summary$submarket)
+summary$prop_region <- NA
+summary$prop_region <- ifelse(summary$region=="Seattle Metro", paste0(summary$location,"-PNW"),summary$prop_region)
+summary$prop_region <- ifelse(summary$region == "Northern California", paste0(summary$location, "-NCAL"), summary$prop_region)
+summary$prop_region <- ifelse(summary$region == "Southern California", paste0(summary$location, "-SCAL"), summary$prop_region)
+
+#high_actual <- filter(summary, actual_total >= 250)
+#low_actual <- filter(summary, expected_total > 150 & expected_total<200 & actual_total < 200)
+#low_actual2 <- filter(summary, expected_total > 250 & actual_total < 200)
+
+
+outliers <- summary %>% filter(actual_total >= 150)
+
+a <- list(
+  x = outliers$expected_total,
+  y = outliers$actual_total,
+  text = outliers$location,
+  xref = "x",
+  yref = "y",
+  #showarrow = TRUE,
+  #arrowhead = 7,
+  ax = -20,
+  ay = 40
+)
+outliers <- summary %>% filter(expected_total > 115)
+
+b <- list(
+  x = outliers$expected_total,
+  y = outliers$actual_total,
+  text = outliers$location,
+  xref = "x",
+  yref = "y",
+  #showarrow = TRUE,
+  #arrowhead = 7,
+  ax = 20,
+  ay = -40
+)
+outliers <- summary %>% filter(location == "Park Viridian")
+
+c <- list(
+  x = outliers$expected_total,
+  y = outliers$actual_total,
+  text = outliers$location,
+  xref = "x",
+  yref = "y",
+  #showarrow = TRUE,
+  #arrowhead = 7,
+  ax = -20,
+  ay = 25
+)
+
+outliers <- summary %>% filter(location == "Windsor Ridge" | location == "The Blake LA" | location == "The Dylan" | location == "Park Highland" | location == "BellCentre")
+
+d <- list(
+  x = outliers$expected_total,
+  y = outliers$actual_total,
+  text = outliers$prop_region,
+  xref = "x",
+  yref = "y",
+  #showarrow = TRUE,
+  #arrowhead = 7,
+  ax = -20,
+  ay = 25
+)
+
+outliers <- summary %>% filter(location == "Bella Villagio")
+
+e <- list(
+  x = outliers$expected_total,
+  y = outliers$actual_total,
+  text = outliers$prop_region,
+  xref = "x",
+  yref = "y",
+  #showarrow = TRUE,
+  #arrowhead = 7,
+  ax = 20,
+  ay = -25
+)
+
+summary2 <- summary %>% 
+  rename("Maintenance Workers per 100 Units" = maint_per_100,
+         "Operational Maintenance Vacancy" = omv)
+
+plot <- ggplot(summary2,aes(x = expected_total, y = actual_total, col = `Operational Maintenance Vacancy`, group = 1, text = paste("Region: ", region,"<br>Property: ", location, "<br>Residuals: ", residuals, "<br>Units: ",units))) +
+  geom_point() +
+  #geom_abline(intercept = 0, slope = 1, color = "red", size = 0.5, linetype = "longdash") + 
+  geom_smooth(method = lm, se = F, color = "red", linetype = "longdash",size = 0.5) +
+  labs(title = "Expected vs Actual Task Days - Urgent", subtitle = "per Month per 100 Units")+
+  xlab("Expected Total Task Days") +
+  ylab("Actual Total Task Days") +
+  #scale_color_manual(values = c("#FE9666","#8AD4EB","#01B8AA"))+
+  #theme_light() +
+  theme(legend.title = element_blank()) 
+
+
+mid = mean(summary2$`Operational Maintenance Vacancy`)
+
+plot <- plot + 
+  scale_color_gradient2(midpoint = mid, low = 'green',mid = "white",high = "red", space = "Lab") 
+
+ggplotly(plot, tooltip = "text")
+  #layout(annotations = a) %>%
+  #layout(annotations = b) %>% 
+  #layout(annotations = c) %>%
+  #layout(annotations = d) %>%
+  #layout(annotations = e)
+
+
+# ggplot(summary, aes(x = `Maintenance Workers per 100 Units`, y = actual_total)) +
+#   geom_point() +
+#   xlab("Maintenance Workers per 100 Units") +
+#   ylab("Actual Task Days") +
+#   stat_smooth(method = "lm") +
+#   theme_light()
+          
+```
+
+
+
