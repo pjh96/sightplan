@@ -19,7 +19,7 @@ total_time <-  as.numeric(task_report_thru - base_day) - 12 #95th percent
 total_months <- total_time/30
 
 #read in all data
-data_path <- "C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/task_logs_new/"
+data_path <- "task_logs_new/"
 
 tasks = list.files(data_path) %>%
   str_subset("task") %>%
@@ -79,19 +79,20 @@ tasks <- tasks %>%
   filter(location != "Museum Park")
 #----
 
+#Use local directory 
 #Mapping files
-mapping <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/sightplan_location_names.xlsx", sheet = "Sheet1") %>% clean_names() %>% select(community_name:yardi)
+mapping <- read_excel("sightplan_location_names.xlsx", sheet = "Sheet1") %>% clean_names() %>% select(community_name:yardi)
 
 mapping$yardi <- ifelse(nchar(mapping$yardi)==1,paste0("00",mapping$yardi),mapping$yardi)
 mapping$yardi <- ifelse(nchar(mapping$yardi)==2,paste0("0",mapping$yardi),mapping$yardi)
 
-dimprop <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/dimprop.csv", colClasses = "character")
+dimprop <- read.csv("dimprop.csv", colClasses = "character")
 
 mapping <- left_join(mapping,dimprop, by = c("yardi"="property_code")) %>%
   rename(same_store = status)
 
 #Maintenance headcount
-headcount <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/maintenance_head_count.xlsx", sheet = "Sheet2", col_types = "text") %>% 
+headcount <- read_excel("maintenance_head_count.xlsx", sheet = "Sheet2", col_types = "text") %>% 
   clean_names() %>% 
   rename(employee_id = row_labels) %>%
   filter(employee_id != "Grand Total") %>% 
@@ -100,8 +101,13 @@ headcount <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/
 headcount$dept_number <- ifelse(nchar(headcount$dept_number)==1, paste0("00",headcount$dept_number),headcount$dept_number)
 headcount$dept_number <- ifelse(nchar(headcount$dept_number)==2, paste0("0",headcount$dept_number),headcount$dept_number)
 
+headcount_summary <- headcount %>%
+  group_by(yardi) %>%
+  summarise(count = n(),
+            avg_hours = mean(average_hours))
+
 #Maintenance hours
-hours_worked <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/maintenance_head_count.xlsx", sheet = "Sheet3", col_types = "text") %>%
+hours_worked <- read_excel("maintenance_head_count.xlsx", sheet = "Sheet3", col_types = "text") %>%
   clean_names() %>% 
   rename(employee_id = row_labels) %>%
   filter(employee_id != "Grand Total") %>%
@@ -119,7 +125,7 @@ hours_worked$dept_number <- ifelse(nchar(hours_worked$dept_number)==2, paste0("0
 
 #Open positions (April report)
 #open with req.
-ops_open <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Open Jobs Report") %>% 
+ops_open <- read_excel("Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Open Jobs Report") %>% 
   clean_names() %>%
   mutate(row_num = row_number()) %>%
   filter(row_num != 1) %>%
@@ -132,7 +138,7 @@ ops_open <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/L
   select(location_name,job_posting_title)
 
 #Frozen or w/o req
-ops_freeze <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Positions No Req LUIn") %>% 
+ops_freeze <- read_excel("Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet = "Ops - Positions No Req LUIn") %>% 
   clean_names() %>%
   mutate(row_num = row_number()) %>%
   row_to_names(2) %>%
@@ -167,7 +173,7 @@ open <- open %>%
 
 #budgeted positions
 #same store
-ss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Same Store") %>%
+ss <- read_excel("FTE_BudFY20.xlsx", sheet = "FTE - Same Store") %>%
   row_to_names(1) %>%
   clean_names() %>%
   filter(grepl("\\(",property)) %>%
@@ -180,7 +186,7 @@ ss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R
   summarise(budget = sum(value))
 
 #joint venture
-jv <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Total JV") %>%
+jv <- read_excel("FTE_BudFY20.xlsx", sheet = "FTE - Total JV") %>%
   row_to_names(1) %>%
   clean_names() %>%
   filter(grepl("\\(",property)) %>%
@@ -193,7 +199,7 @@ jv <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R
   summarise(budget = sum(value))
 
 #non same store
-nss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/FTE_BudFY20.xlsx", sheet = "FTE - Non Same Store") %>%
+nss <- read_excel("FTE_BudFY20.xlsx", sheet = "FTE - Non Same Store") %>%
   row_to_names(1) %>%
   clean_names() %>%
   filter(grepl("\\(",property)) %>%
@@ -208,17 +214,21 @@ nss <- read_excel("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_
 budget <- rbind(ss,jv)
 budget <- rbind(budget,nss)
 
-
+ov <- left_join(budget,open, by = "property_code") %>%
+  mutate(count = ifelse(is.na(count),0,count))%>%
+  mutate(omv = count/budget) %>%
+  mutate(omv = ifelse(is.nan(omv),0,omv))
 
 #all reviews
-reviews <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_thru_2020_05_29.csv", colClasses = "character") %>% janitor::clean_names() %>%
- rename(property = i_business_name) %>%
-  select(property:review_detail) %>%
-    mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
-         client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
+#file too large, not in repository - contact if needed
+# reviews <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_thru_2020_05_29.csv", colClasses = "character") %>% janitor::clean_names() %>%
+#  rename(property = i_business_name) %>%
+#   select(property:review_detail) %>%
+#     mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
+#          client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
 
 #maintenance related 1 star reviews
-reviews_maint_related <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_20200401_thru_20200601.csv", colClasses = "character") %>% 
+reviews_maint_related <- read.csv("reviews_20200401_thru_20200601.csv", colClasses = "character") %>% 
   clean_names() %>%
   filter(rating == 1) %>%
   filter(maintenance_related == "1") %>%
@@ -273,7 +283,7 @@ write.csv(to_export, "C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Loc
 ```{r maintenace tasks only}
 #MAINTENANCE TASKS FOR ANALYSIS
 #filter for only maintenance tasks after 2020-04-01 and before final day minus 95th percentile to account for open tasks 
-maintenance <- tasks %>% filter(workspace=="Maintenance" & status == "Closed" & (created_date >= '2020-04-01' & created_date <= '2020-05-20'))
+maintenance <- tasks %>% filter(workspace=="Maintenance" & status == "Closed" & (created_date >= '2020-04-01' & created_date <= '2020-05-20')) # 2020-05-31 - 12
 maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date,  maintenance$created_date, units = "days"))
 
 #change certain property names to allow mapping
@@ -760,18 +770,6 @@ summary <- maintenance %>%
   arrange(desc(weighted_z_scores))  %>%
   filter(!is.nan(weighted_z_scores)) 
 
-reviews_maint_related <- read.csv("C:/Users/phummelt/OneDrive - Essex Property Trust, Inc/Local_R_Material/Data/SightPlan_Data/reviews_20200401_thru_20200601.csv", colClasses = "character") %>% 
-  clean_names() %>%
-  filter(rating == 1) %>%
-  filter(maintenance_related == "1") %>%
-  rename(property = business_name) %>%
-  select(property:review_detail) %>%
-    mutate(client_location_id = ifelse(nchar(client_location_id) == 1, paste0("00",client_location_id), client_location_id),
-         client_location_id = ifelse(nchar(client_location_id) == 2, paste0("0", client_location_id), client_location_id))
-
-one_star <- reviews_maint_related %>% 
-  count(client_location_id) 
-
 
 #Reactable
 #----
@@ -866,15 +864,6 @@ ggplotly(x, tooltip = "text")
 #### Data: closed, non urgent maintenance tasks after 2020-04-01 for properties with > 100 units
 *Hover cursor to identify property*
 ```{r expected v actual task days, echo = F, warning = F, message = F, fig.height=8, fig.width=11}
-headcount_summary <- headcount %>%
-  group_by(yardi) %>%
-  summarise(count = n(),
-            avg_hours = mean(average_hours))
-
-ov <- left_join(budget,open, by = "property_code") %>%
-  mutate(count = ifelse(is.na(count),0,count))%>%
-  mutate(omv = count/budget) %>%
-  mutate(omv = ifelse(is.nan(omv),0,omv))
 
 maintenance$time_to_complete <- as.numeric(difftime(maintenance$closed_date, maintenance$created_date, units = "days"))
 maintenance$yardi <- ifelse(nchar(maintenance$yardi)==1,paste0("00",maintenance$yardi),maintenance$yardi)
@@ -1285,6 +1274,7 @@ test <- maintenance %>%
   select(location, category, subcategory, status, created_date, closed_date, time_to_complete, urgency)
 ```
 
+
 ```{r maintenance efficiency, echo = F, warning = F}
 #maintenance efficiency 
 dept_to_yardi <- headcount %>% select(dept_number, yardi) %>% unique()
@@ -1337,9 +1327,10 @@ all_maintenance %>%
 ```
 
 
-```{r expected versus availalbe maintenance days}
+```{r expected versus available maintenance days}
 #summarise maintenance tasks looking at resident and total completed
 summary <- maintenance %>% 
+  filter(units > 30) %>% #filters out pinehurst apartments and Belmont lucas house
   group_by(location) %>%
   mutate(all_task_count = n()) %>% #all closed maintenance tasks
   ungroup %>%
@@ -1356,7 +1347,7 @@ summary <- maintenance %>%
             all_task_count = mean(all_task_count),
             portfolio_avg_time = mean(portfolio_avg_time),
             property_avg_time = mean(time_to_complete),
-            count_per_week = ((resident_count/total_time)*7)/units) %>% #April 1 - May 31-95th percentile days to complete
+            count_per_week = (((resident_count/total_time)*7)/units)*100) %>% #April 1 - May 31-95th percentile days to complete
   mutate(expected_task_days = portfolio_avg_time * count_per_week,
          actual_task_days = property_avg_time * count_per_week,
          all_task_count_per_unit = all_task_count/units) %>%
@@ -1393,7 +1384,7 @@ plot <- summary %>%
     ggplot(aes(x = expected_total, y = man_days_per_week, group = 1, text = paste("Property: ",location,'<br>Submarket: ', submarket, "<br>Units: ", reporting_unit_count), col  = `Expected Task Days Z-Score`, size = reporting_unit_count)) +
   geom_point() +
   geom_smooth(method = "lm") + 
-  labs(x = "Expected Task Days per Week", y = "Available Maintenance Days per Week", title = "Availalble Maintenance Work Days per Week and Avg. Expected Task Days",subtitle = "Expected total based on resident reported tasks only") +
+  labs(x = "Expected Task Days per Week per 100 Units", y = "Available Maintenance Hours per Week per 100 Units", title = "Availalble Maintenance and Expected Task Days",subtitle = "Expected total based on resident reported tasks only") +
   scale_color_gradient2(low = "green", mid = "lightgrey", high = "red") +
   scale_size_continuous(range = c(0.5, 4.5)) + 
   theme_light()
@@ -1433,7 +1424,7 @@ ggplotly(plot, tooltip = "text")
 
 #By region
 #choices are "Northern California" "Southern California" or "Seattle Metro"
-region_choice <- "Northern California"
+region_choice <- "Southern California"
 
 labels_subset <- summary %>%
   filter(region == region_choice & operation_status != "Non Stabilized") %>%
@@ -1451,7 +1442,7 @@ subset <- summary %>%
 p <- ggplot(subset, aes(x = actual_over_expected, y = man_hours_per_week_per_unit , group = 1, label = location, col  = `Workload (Total Tasks/Units)`, size = reporting_unit_count, text = paste("Property: ",location,'<br>Submarket: ', submarket, "<br>Units: ", reporting_unit_count))) +
   geom_point() +
   geom_smooth(method = "lm", show.legend = F, se = F) +
-  labs(x = "Actual/Expected Avg. Task Days(Inefficiency)", y = "Available Maintenance Hours per Week per 100 Units", title = "Available Maintenance Time and Actual vs Expected Time to Complete Tasks",caption = "", subtitle = region_choice) +
+  labs(x = "Actual / Expected Mean Task Days (Inefficiency)", y = "Available Maintenance Hours per Week per 100 Units", title = "Available Maintenance Time and Actual vs Expected Time to Complete Tasks",caption = "Inefficiency measure based on resident reported tasks only", subtitle = region_choice) +
   scale_color_gradient2(low = "green", mid = "lightgrey", high = "red", midpoint = median(subset$`Workload (Total Tasks/Units)`)) +
   scale_size_continuous(range = c(1, 5), name = "Units") + 
   theme_light() +
@@ -1466,9 +1457,10 @@ p <- ggplot(subset, aes(x = actual_over_expected, y = man_hours_per_week_per_uni
 p
 
 ggplotly(p, tooltip = "text") %>%
-    layout(title = list(text = paste0('Available Maintenance Days per Week vs. Resident Reported Task Completion Efficiency',
+    layout(title = list(text = paste0('Available Maintenance Time and Actual vs Expected Time to Complete Tasks',
                                     '<br>',
-                                    
+                                    "<sup>",
+                                    "Region:",region_choice,
                                     '<sup>')))
 #----
 
