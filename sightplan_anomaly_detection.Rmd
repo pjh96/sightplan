@@ -1566,3 +1566,27 @@ tasks %>%
 ```
 
 
+```{r looking at full time employees}
+full_time <- hours_worked %>% filter(date <= "2020-05-20") 
+full_time %>%
+  group_by(employee_id) %>%
+  #complete(date = seq.Date(as.Date("2020-04-01"),as.Date("2020-05-20"),by="day")) %>%
+  mutate(days_worked = n()) %>% 
+  summarise(sum_hours = sum(as.numeric(hours_worked)),
+            days_worked = as.numeric(mean(days_worked))) %>%
+  ungroup() %>%
+  mutate(avg_hours_per_week = (sum_hours/days_worked)*5) %>% View()
+
+full_time %>%
+  group_by(employee_id) %>%
+  mutate(days_worked = n()) %>% 
+  complete(date = seq.Date(as.Date("2020-04-01"),as.Date("2020-05-20"),by="day")) %>%
+  mutate(hours_worked = ifelse(is.na(hours_worked),0,hours_worked),
+         hours_worked = as.numeric(hours_worked),
+         hours_in_the_week = roll_sum(hours_worked,7,align="right",fill = NA)) %>% View()
+  summarise(sum_hours = sum(as.numeric(hours_worked)),
+            days_worked = as.numeric(mean(days_worked))) %>%
+  ungroup() %>%
+  mutate(avg_hours_per_week = (sum_hours/days_worked)*5) %>% View()
+```
+
