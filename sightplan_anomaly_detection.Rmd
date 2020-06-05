@@ -134,7 +134,7 @@ ops_open <- read_excel("Weekly Open Jobs Vacancy Report April 2020.xlsx", sheet 
   clean_names() %>%
   filter(!is.na(location_name)) %>% 
   select(location_name:requisition_id) %>%
-  filter(grepl("Maintenance", job_posting_title)) %>%
+  filter(grepl("Maintenance", job_posting_title)|grepl("Porter", job_posting_title) | grepl("Painter", job_posting_title) | grepl("Landscap",job_posting_title) | grepl("Enginee",job_posting_title)) %>%
   select(location_name,job_posting_title)
 
 #Frozen or w/o req
@@ -147,7 +147,7 @@ ops_freeze <- read_excel("Weekly Open Jobs Vacancy Report April 2020.xlsx", shee
   clean_names() %>%
   filter(!is.na(location_name)) %>% 
   select(location_name:number_of_positions) %>%
-  filter(grepl("Maintenance", open_position_title)) %>%
+  filter(grepl("Maintenance", open_position_title)|grepl("Porter", open_position_title) | grepl("Painter", open_position_title) | grepl("Landscap",open_position_title) | grepl("Enginee",open_position_title)) %>%
   select(location_name, open_position_title) %>%
   rename(job_posting_title = open_position_title)
 
@@ -179,8 +179,8 @@ ss <- read_excel("FTE_BudFY20.xlsx", sheet = "FTE - Same Store") %>%
   filter(grepl("\\(",property)) %>%
   separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
   mutate(property_code = gsub(")","",property_code)) %>%
-  select(property, property_code, contains("ainten")) %>% 
-  gather(3:7, key = "key",value = "value") %>%
+  select(property, property_code, maintenance) %>% 
+  gather(3, key = "key",value = "value") %>%
   mutate(value = as.numeric(value)) %>%
   group_by(property_code) %>%
   summarise(budget = sum(value))
@@ -192,8 +192,8 @@ jv <- read_excel("FTE_BudFY20.xlsx", sheet = "FTE - Total JV") %>%
   filter(grepl("\\(",property)) %>%
   separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
   mutate(property_code = gsub(")","",property_code)) %>%
-  select(property, property_code, contains("ainten")) %>% 
-  gather(3:7, key = "key",value = "value") %>%
+  select(property, property_code, maintenance) %>% 
+  gather(3, key = "key",value = "value") %>%
   mutate(value = as.numeric(value)) %>%
   group_by(property_code) %>%
   summarise(budget = sum(value))
@@ -205,8 +205,8 @@ nss <- read_excel("FTE_BudFY20.xlsx", sheet = "FTE - Non Same Store") %>%
   filter(grepl("\\(",property)) %>%
   separate(property, into = c("property","property_code"), sep = "\\(", ) %>%
   mutate(property_code = gsub(")","",property_code)) %>%
-  select(property, property_code, contains("ainten")) %>% 
-  gather(3:7, key = "key",value = "value") %>%
+  select(property, property_code, maintenance) %>% 
+  gather(3, key = "key",value = "value") %>%
   mutate(value = as.numeric(value)) %>%
   group_by(property_code) %>%
   summarise(budget = sum(value))
@@ -1567,26 +1567,30 @@ tasks %>%
 
 
 ```{r looking at full time employees}
-full_time <- hours_worked %>% filter(date <= "2020-05-20") 
+full_time <- hours_worked %>% filter(date <= "2020-05-20")#period of interest
+
+#average hours per week (sum/days worked * 5)
 full_time %>%
   group_by(employee_id) %>%
-  #complete(date = seq.Date(as.Date("2020-04-01"),as.Date("2020-05-20"),by="day")) %>%
   mutate(days_worked = n()) %>% 
   summarise(sum_hours = sum(as.numeric(hours_worked)),
-            days_worked = as.numeric(mean(days_worked))) %>%
+            days_worked = as.numeric(mean(days_worked)),
+            weeks_worked = days_worked/5,
+            first_day = min(date),
+            last_day = max(date)) %>%
   ungroup() %>%
   mutate(avg_hours_per_week = (sum_hours/days_worked)*5) %>% View()
 
+#sum of hours each week
+week_end <- as.Date(c("2020-04-07","2020-04-14","2020-04-21","2020-04-28","2020-05-05","2020-05-12","2020-05-19"))
 full_time %>%
   group_by(employee_id) %>%
   mutate(days_worked = n()) %>% 
   complete(date = seq.Date(as.Date("2020-04-01"),as.Date("2020-05-20"),by="day")) %>%
   mutate(hours_worked = ifelse(is.na(hours_worked),0,hours_worked),
          hours_worked = as.numeric(hours_worked),
-         hours_in_the_week = roll_sum(hours_worked,7,align="right",fill = NA)) %>% View()
-  summarise(sum_hours = sum(as.numeric(hours_worked)),
-            days_worked = as.numeric(mean(days_worked))) %>%
-  ungroup() %>%
-  mutate(avg_hours_per_week = (sum_hours/days_worked)*5) %>% View()
+         hours_in_the_week = roll_sum(hours_worked,7,align="right",fill = NA)) %>% 
+  filter(date %in% week_end) %>% 
+  arrange(employee_id) %>% View()
 ```
 
