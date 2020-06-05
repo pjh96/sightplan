@@ -1355,7 +1355,7 @@ summary <- maintenance %>%
   group_by(location) %>%
   summarise(expected_total = sum(expected_task_days),
             actual_total = sum(actual_task_days),
-            efficiency = actual_total/expected_total,
+            efficiency = expected_total/actual_total,
             all_task_count_per_unit = mean(all_task_count_per_unit)) %>%
   mutate(log = log(expected_total)) %>%
   mutate(expected_total_z_score = (log - mean(log))/sd(log))
@@ -1368,7 +1368,8 @@ summary <- summary %>%
   mutate(reporting_unit_count = as.numeric(reporting_unit_count)) %>%
   mutate(man_days_per_week = (count*7),
          man_hours_per_week_per_unit = ((avg_hours*7*count)/reporting_unit_count)*100,
-         actual_over_expected = actual_total/expected_total)
+         actual_over_expected = actual_total/expected_total,
+         expected_over_actual = expected_total/actual_total)
 
 ggplot(summary, aes(x = reporting_unit_count, y = man_days_per_week)) +
   geom_point() +
@@ -1442,7 +1443,7 @@ subset <- summary %>%
 p <- ggplot(subset, aes(x = actual_over_expected, y = man_hours_per_week_per_unit , group = 1, label = location, col  = `Workload (Total Tasks/Units)`, size = reporting_unit_count, text = paste("Property: ",location,'<br>Submarket: ', submarket, "<br>Units: ", reporting_unit_count))) +
   geom_point() +
   geom_smooth(method = "lm", show.legend = F, se = F) +
-  labs(x = "Actual / Expected Mean Task Days (Inefficiency)", y = "Available Maintenance Hours per Week per 100 Units", title = "Available Maintenance Time and Actual vs Expected Time to Complete Tasks",caption = "Inefficiency measure based on resident reported tasks only", subtitle = region_choice) +
+  labs(x = "Actual / Expected Mean Task Days (Inefficiency)", y = "Available Maintenance Hours per Week per 100 Units", title = "Available Maintenance Time and Actual vs Expected Time to Complete Tasks",caption = "Efficiency measure based on resident reported tasks only", subtitle = region_choice) +
   scale_color_gradient2(low = "green", mid = "lightgrey", high = "red", midpoint = median(subset$`Workload (Total Tasks/Units)`)) +
   scale_size_continuous(range = c(1, 5), name = "Units") + 
   theme_light() +
